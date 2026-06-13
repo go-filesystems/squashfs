@@ -18,7 +18,8 @@ parses an image produced by `mksquashfs` and exposes it through the shared
 | ReadLink / Symlinks | ✅ | Targets read; followed during path resolution |
 | Compression — gzip / xz / zstd / lzo / lz4 | ✅ | gzip (zlib), xz (LZMA2, no BCJ), zstd, LZO1X, LZ4 |
 | Compression — lzma (legacy) | ⏳ | Returns `ErrUnsupportedCompression` |
-| Write operations | ❌ | Read-only format; mutators return `ErrReadOnly` |
+| Create image (`BuildFromDir`) | ✅ | Build a SquashFS 4.0 image from a tree; gzip or uncompressed; `unsquashfs`-readable |
+| In-place writes (`WriteFile`/`MkDir`/…) | ❌ | The archive is immutable once written; mutators return `ErrReadOnly` |
 
 ## References
 
@@ -40,12 +41,17 @@ defer fs.Close()
 
 data, err := fs.ReadFile("/etc/hostname")
 entries, err := fs.ListDir("/")
+
+// Create an image from a directory tree (gzip by default).
+err = squashfs.BuildFromDir("out.squashfs", "/path/to/tree", squashfs.BuildOptions{})
 ```
 
 ## Limitations
 
-- Read-only (the on-disk format is read-only by design).
-- gzip, xz, zstd, LZO and lz4 blocks are decoded; only legacy standalone lzma is
-  not (returns `ErrUnsupportedCompression`). xz with BCJ filters is unsupported.
-- Extended attributes (xattr table) are not surfaced yet.
+- Reading: gzip, xz, zstd, LZO and lz4 blocks are decoded; only legacy standalone
+  lzma is not (returns `ErrUnsupportedCompression`). xz with BCJ filters is unsupported.
+- Writing (`BuildFromDir`): produces gzip or uncompressed images; files are
+  stored as full data blocks (no tail-end fragment packing yet), all owned by
+  uid/gid 0, no xattrs. Once written, an image is immutable (no in-place edits).
+- Extended attributes (xattr table) are not surfaced.
 - Intended for tooling and testing.
