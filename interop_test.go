@@ -66,6 +66,51 @@ func TestInterop_LargeDir(t *testing.T) {
 	}
 }
 
+// TestInterop_Compressors masters the same tree with each supported mksquashfs
+// compressor and verifies the driver decodes it. A compressor the local
+// mksquashfs build lacks is skipped, not failed.
+func TestInterop_Compressors(t *testing.T) {
+	mksquashfs := findTool("mksquashfs")
+	if mksquashfs == "" {
+		t.Skip("mksquashfs not available")
+	}
+	src := t.TempDir()
+	small := []byte("compressor parity\n")
+	big := pattern(300000) // multi-block + fragment
+	if err := os.WriteFile(filepath.Join(src, "small.txt"), small, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, comp := range []string{"gzip", "zstd", "lzo", "xz"} {
+		t.Run(comp, func(t *testing.T) {
+			img := filepath.Join(t.TempDir(), comp+".squashfs")
+			out, err := exec.Command(mksquashfs, src, img, "-noappend", "-no-progress", "-comp", comp).CombinedOutput()
+			if err != nil {
+				if bytes.Contains(bytes.ToLower(out), []byte("not support")) ||
+					bytes.Contains(bytes.ToLower(out), []byte("unrecognised")) ||
+					bytes.Contains(bytes.ToLower(out), []byte("invalid compressor")) {
+					t.Skipf("mksquashfs lacks %s: %s", comp, out)
+				}
+				t.Fatalf("mksquashfs -comp %s: %v\n%s", comp, err, out)
+			}
+			fs, err := OpenFile(img)
+			if err != nil {
+				t.Fatalf("OpenFile (%s): %v", comp, err)
+			}
+			defer fs.Close()
+			if got, err := fs.ReadFile("/big.bin"); err != nil || !bytes.Equal(got, big) {
+				t.Errorf("[%s] ReadFile(/big.bin): err=%v equal=%v", comp, err, bytes.Equal(got, big))
+			}
+			if got, err := fs.ReadFile("/small.txt"); err != nil || !bytes.Equal(got, small) {
+				t.Errorf("[%s] ReadFile(/small.txt): err=%v equal=%v", comp, err, bytes.Equal(got, small))
+			}
+		})
+	}
+}
+
 func fileName(i int) string {
 	return "f" + string(rune('0'+i/100%10)) + string(rune('0'+i/10%10)) + string(rune('0'+i%10))
 }

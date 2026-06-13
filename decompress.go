@@ -8,6 +8,10 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
+
+	lzo "github.com/anchore/go-lzo"
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 // decompressor decompresses a single SquashFS block. Implementations are
@@ -23,7 +27,13 @@ func newDecompressor(compression uint16) (decompressor, error) {
 	switch compression {
 	case compGZIP:
 		return gzipDecompressor{}, nil
-	case compLZMA, compLZO, compXZ, compLZ4, compZSTD:
+	case compXZ:
+		return xzDecompressor{}, nil
+	case compLZO:
+		return lzoDecompressor{}, nil
+	case compZSTD:
+		return zstdDecompressor{}, nil
+	case compLZMA, compLZ4:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
 	default:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
@@ -45,6 +55,57 @@ func (gzipDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	out, err := io.ReadAll(io.LimitReader(zr, int64(maxOut)+1))
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: zlib read: %w", err)
+	}
+	if len(out) > maxOut {
+		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
+	}
+	return out, nil
+}
+
+// xzDecompressor decodes SquashFS "xz" blocks (standard .xz streams / LZMA2,
+// without BCJ filters — mksquashfs's default).
+type xzDecompressor struct{}
+
+func (xzDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
+	r, err := xz.NewReader(bytes.NewReader(src))
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: xz: %w", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: xz read: %w", err)
+	}
+	if len(out) > maxOut {
+		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
+	}
+	return out, nil
+}
+
+// lzoDecompressor decodes SquashFS "lzo" blocks (raw LZO1X).
+type lzoDecompressor struct{}
+
+func (lzoDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
+	dst := make([]byte, maxOut)
+	n, err := lzo.Decompress(src, dst)
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: lzo: %w", err)
+	}
+	return dst[:n], nil
+}
+
+// zstdDecoder is a shared, stateless decoder (safe for concurrent DecodeAll).
+var zstdDecoder = func() *zstd.Decoder {
+	d, _ := zstd.NewReader(nil)
+	return d
+}()
+
+// zstdDecompressor decodes SquashFS "zstd" blocks (standard zstd frames).
+type zstdDecompressor struct{}
+
+func (zstdDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
+	out, err := zstdDecoder.DecodeAll(src, make([]byte, 0, maxOut))
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: zstd: %w", err)
 	}
 	if len(out) > maxOut {
 		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
