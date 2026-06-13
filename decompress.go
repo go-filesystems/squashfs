@@ -11,6 +11,7 @@ import (
 
 	lzo "github.com/anchore/go-lzo"
 	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
 )
 
@@ -33,7 +34,9 @@ func newDecompressor(compression uint16) (decompressor, error) {
 		return lzoDecompressor{}, nil
 	case compZSTD:
 		return zstdDecompressor{}, nil
-	case compLZMA, compLZ4:
+	case compLZ4:
+		return lz4Decompressor{}, nil
+	case compLZMA:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
 	default:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
@@ -89,6 +92,18 @@ func (lzoDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	n, err := lzo.Decompress(src, dst)
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: lzo: %w", err)
+	}
+	return dst[:n], nil
+}
+
+// lz4Decompressor decodes SquashFS "lz4" blocks (raw LZ4 block format).
+type lz4Decompressor struct{}
+
+func (lz4Decompressor) decompress(src []byte, maxOut int) ([]byte, error) {
+	dst := make([]byte, maxOut)
+	n, err := lz4.UncompressBlock(src, dst)
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: lz4: %w", err)
 	}
 	return dst[:n], nil
 }

@@ -9,4 +9,6 @@ require (
 	github.com/ulikunitz/xz v0.5.12
 )
 
+require github.com/pierrec/lz4/v4 v4.1.22
+
 replace github.com/go-filesystems/interface => ../interface

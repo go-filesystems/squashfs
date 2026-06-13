@@ -84,7 +84,7 @@ func TestInterop_Compressors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, comp := range []string{"gzip", "zstd", "lzo", "xz"} {
+	for _, comp := range []string{"gzip", "zstd", "lzo", "xz", "lz4"} {
 		t.Run(comp, func(t *testing.T) {
 			img := filepath.Join(t.TempDir(), comp+".squashfs")
 			out, err := exec.Command(mksquashfs, src, img, "-noappend", "-no-progress", "-comp", comp).CombinedOutput()

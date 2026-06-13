@@ -16,8 +16,8 @@ parses an image produced by `mksquashfs` and exposes it through the shared
 | ListDir | ✅ | Multi-header directories (no `.`/`..` — SquashFS omits them) |
 | Stat | ✅ | mode (type + perms), size, inode number |
 | ReadLink / Symlinks | ✅ | Targets read; followed during path resolution |
-| Compression — gzip / xz / zstd / lzo | ✅ | gzip (zlib), xz (LZMA2, no BCJ), zstd, LZO1X |
-| Compression — lz4 / lzma | ⏳ | Returns `ErrUnsupportedCompression` (planned) |
+| Compression — gzip / xz / zstd / lzo / lz4 | ✅ | gzip (zlib), xz (LZMA2, no BCJ), zstd, LZO1X, LZ4 |
+| Compression — lzma (legacy) | ⏳ | Returns `ErrUnsupportedCompression` |
 | Write operations | ❌ | Read-only format; mutators return `ErrReadOnly` |
 
 ## References
@@ -45,7 +45,7 @@ entries, err := fs.ListDir("/")
 ## Limitations
 
 - Read-only (the on-disk format is read-only by design).
-- gzip, xz, zstd and LZO blocks are decoded; lz4 and standalone lzma are not yet
-  (they return `ErrUnsupportedCompression`). xz with BCJ filters is unsupported.
+- gzip, xz, zstd, LZO and lz4 blocks are decoded; only legacy standalone lzma is
+  not (returns `ErrUnsupportedCompression`). xz with BCJ filters is unsupported.
 - Extended attributes (xattr table) are not surfaced yet.
 - Intended for tooling and testing.
