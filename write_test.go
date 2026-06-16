@@ -226,27 +226,43 @@ func TestInterop_WriteUnsquashfs(t *testing.T) {
 	if unsq == "" {
 		t.Skip("unsquashfs not available")
 	}
-	src := t.TempDir()
-	files := buildTree(t, src)
-
-	img := filepath.Join(t.TempDir(), "out.squashfs")
-	if err := BuildFromDir(img, src, BuildOptions{}); err != nil {
-		t.Fatalf("BuildFromDir: %v", err)
+	// Each supported write compressor must produce an image real unsquashfs
+	// accepts and extracts byte-exact. LZ4 in particular needs the mandatory
+	// compressor-options block; an image lacking it is rejected here.
+	cases := []struct {
+		name string
+		comp Compressor
+	}{
+		{"gzip", CompressGZIP},
+		{"zstd", CompressZSTD},
+		{"xz", CompressXZ},
+		{"lz4", CompressLZ4},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			files := buildTree(t, src)
 
-	dest := filepath.Join(t.TempDir(), "extract")
-	if out, err := exec.Command(unsq, "-d", dest, img).CombinedOutput(); err != nil {
-		t.Fatalf("unsquashfs: %v\n%s", err, out)
-	}
+			img := filepath.Join(t.TempDir(), "out.squashfs")
+			if err := BuildFromDir(img, src, BuildOptions{Compressor: tc.comp}); err != nil {
+				t.Fatalf("BuildFromDir: %v", err)
+			}
 
-	for name, want := range files {
-		got, err := os.ReadFile(filepath.Join(dest, name))
-		if err != nil || !bytes.Equal(got, want) {
-			t.Errorf("extracted /%s: err=%v equal=%v", name, err, bytes.Equal(got, want))
-		}
-	}
-	// Symlink extracted with the right target.
-	if tgt, err := os.Readlink(filepath.Join(dest, "link")); err != nil || tgt != "hello.txt" {
-		t.Errorf("extracted /link = %q, %v; want hello.txt", tgt, err)
+			dest := filepath.Join(t.TempDir(), "extract")
+			if out, err := exec.Command(unsq, "-d", dest, img).CombinedOutput(); err != nil {
+				t.Fatalf("unsquashfs: %v\n%s", err, out)
+			}
+
+			for name, want := range files {
+				got, err := os.ReadFile(filepath.Join(dest, name))
+				if err != nil || !bytes.Equal(got, want) {
+					t.Errorf("extracted /%s: err=%v equal=%v", name, err, bytes.Equal(got, want))
+				}
+			}
+			// Symlink extracted with the right target.
+			if tgt, err := os.Readlink(filepath.Join(dest, "link")); err != nil || tgt != "hello.txt" {
+				t.Errorf("extracted /link = %q, %v; want hello.txt", tgt, err)
+			}
+		})
 	}
 }

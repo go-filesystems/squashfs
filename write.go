@@ -20,6 +20,16 @@ const (
 	flagUncompressedData   = 0x0002
 	flagNoFragments        = 0x0010
 	flagNoXattrs           = 0x0200
+	flagCompressorOptions  = 0x0400 // a compressor-options block follows the superblock
+)
+
+// LZ4 compressor-options values. SquashFS 4.0 requires an options block after
+// the superblock when the LZ4 compressor is used (unlike gzip/zstd/xz, whose
+// options are optional): struct { __le32 version; __le32 flags; }. version is
+// always LZ4_LEGACY and we encode high-compression blocks, so flags = LZ4_HC.
+const (
+	lz4OptionsVersion = 1 // LZ4_LEGACY
+	lz4OptionsFlagHC  = 1 // LZ4_HC
 )
 
 // BuildOptions configures image creation.
@@ -212,8 +222,12 @@ func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 	iw.inodes = &metaWriter{iw: iw}
 	iw.dirs = &metaWriter{iw: iw}
 
-	// Superblock placeholder; data blocks follow immediately.
+	// Superblock placeholder. For LZ4 a mandatory compressor-options block must
+	// immediately follow the superblock (real unsquashfs rejects the image
+	// otherwise); everything after is addressed by absolute offset, so emitting
+	// it here keeps the rest of the layout correct automatically.
 	iw.data.Write(make([]byte, superblockSize))
+	iw.writeCompressorOptions()
 
 	// Emit the tree (post-order: children before their parent directory).
 	if err := iw.emitNode(root); err != nil {
@@ -293,6 +307,29 @@ func (iw *imageWriter) writeFragmentTable() uint64 {
 		iw.data.Write(b[:])
 	}
 	return start
+}
+
+// hasCompressorOptions reports whether the selected compressor requires an
+// options block to follow the superblock. Only LZ4 does among those we write.
+func (iw *imageWriter) hasCompressorOptions() bool {
+	return iw.comp != nil && iw.comp.id() == compLZ4
+}
+
+// writeCompressorOptions emits the compressor-options metadata block when the
+// compressor mandates one. The payload is stored uncompressed (the metadata
+// header's raw bit is set), exactly as mksquashfs writes it.
+func (iw *imageWriter) writeCompressorOptions() {
+	if !iw.hasCompressorOptions() {
+		return
+	}
+	le := binary.LittleEndian
+	var payload [8]byte // struct { __le32 version; __le32 flags; }
+	le.PutUint32(payload[0:], lz4OptionsVersion)
+	le.PutUint32(payload[4:], lz4OptionsFlagHC)
+	var h [2]byte
+	le.PutUint16(h[:], uint16(len(payload))|metaHeaderCompressedBit) // raw, uncompressed
+	iw.data.Write(h[:])
+	iw.data.Write(payload[:])
 }
 
 // writeMetaBlock appends a single standalone metadata block to the image.
@@ -536,6 +573,9 @@ func (iw *imageWriter) superblock(rootRef uint64, inodeCount uint32, inodeStart,
 	}
 	if iw.opts.Uncompressed {
 		flags |= flagUncompressedInodes | flagUncompressedData
+	}
+	if iw.hasCompressorOptions() {
+		flags |= flagCompressorOptions
 	}
 	le.PutUint16(b[0x18:], flags)
 	le.PutUint16(b[0x1A:], 1) // id count
