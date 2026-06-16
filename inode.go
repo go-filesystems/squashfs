@@ -50,6 +50,10 @@ type inode struct {
 	Number uint32
 	Size   uint64 // regular-file size, or directory listing data size
 
+	// Extended inodes carry an index into the xattr id table; basic inodes
+	// have none, recorded as noXattr.
+	xattrIdx uint32
+
 	// Regular file.
 	blocksStart uint64
 	fragIdx     uint32
@@ -111,11 +115,12 @@ func readInode(fs *FS, ref uint64) (*inode, error) {
 	}
 	le := binary.LittleEndian
 	in := &inode{
-		Type:   le.Uint16(hdr[0:]),
-		UID:    le.Uint16(hdr[4:]),
-		GID:    le.Uint16(hdr[6:]),
-		Mtime:  le.Uint32(hdr[8:]),
-		Number: le.Uint32(hdr[12:]),
+		Type:     le.Uint16(hdr[0:]),
+		UID:      le.Uint16(hdr[4:]),
+		GID:      le.Uint16(hdr[6:]),
+		Mtime:    le.Uint32(hdr[8:]),
+		Number:   le.Uint32(hdr[12:]),
+		xattrIdx: noXattr,
 	}
 	in.Mode = le.Uint16(hdr[2:]) | typeBits(in.Type)
 
@@ -138,6 +143,7 @@ func readInode(fs *FS, ref uint64) (*inode, error) {
 		fileSize := uint64(le.Uint32(b[4:]))
 		in.dirStartBlock = le.Uint32(b[8:])
 		in.dirOffset = le.Uint16(b[18:])
+		in.xattrIdx = le.Uint32(b[20:])
 		in.Size = dirDataSize(fileSize)
 
 	case inodeBasicFile:
@@ -162,6 +168,7 @@ func readInode(fs *FS, ref uint64) (*inode, error) {
 		in.Size = le.Uint64(b[8:])
 		in.fragIdx = le.Uint32(b[28:])
 		in.fragOffset = le.Uint32(b[32:])
+		in.xattrIdx = le.Uint32(b[36:])
 		if err := in.readBlockList(c, fs.sb.BlockSize); err != nil {
 			return nil, err
 		}
@@ -181,6 +188,14 @@ func readInode(fs *FS, ref uint64) (*inode, error) {
 		}
 		in.symlinkTarget = string(target)
 		in.Size = uint64(n)
+		if in.Type == inodeExtSymlink {
+			// Extended symlinks carry a trailing xattr index after the target.
+			xb, err := c.readN(4)
+			if err != nil {
+				return nil, err
+			}
+			in.xattrIdx = le.Uint32(xb)
+		}
 
 	case inodeBasicChrdev, inodeBasicBlkdev, inodeBasicFifo, inodeBasicSocket,
 		inodeExtChrdev, inodeExtBlkdev, inodeExtFifo, inodeExtSocket:

@@ -121,6 +121,37 @@ func (fs *FS) Stat(path string) (filesystem.Stat, error) {
 	return filesystem.NewStat(in.Mode, in.Size, uint64(in.Number)), nil
 }
 
+// Xattrs resolves path (following symlinks) and returns its extended
+// attributes, keyed by fully-qualified name (with the namespace prefix, e.g.
+// "user.comment") and mapped to the raw value bytes.
+//
+// A nil map (and nil error) is returned when the node has no attributes or the
+// image carries no xattr table. Only the extended inode variants store an
+// xattr index, so basic inodes always report none.
+func (fs *FS) Xattrs(path string) (map[string][]byte, error) {
+	in, err := resolve(fs, path, true)
+	if err != nil {
+		return nil, err
+	}
+	return fs.inodeXattrs(in)
+}
+
+// inodeXattrs fetches the extended attributes recorded for inode in.
+func (fs *FS) inodeXattrs(in *inode) (map[string][]byte, error) {
+	if in.xattrIdx == noXattr || !fs.hasXattrTable() {
+		return nil, nil
+	}
+	t, err := fs.readXattrTable()
+	if err != nil {
+		return nil, err
+	}
+	e, err := fs.readXattrIDEntry(t, in.xattrIdx)
+	if err != nil {
+		return nil, err
+	}
+	return fs.readXattrPairs(t, e)
+}
+
 // ReadLink returns the target of the symbolic link at path; the final
 // component is not followed.
 func (fs *FS) ReadLink(path string) (string, error) {
