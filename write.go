@@ -5,7 +5,6 @@ package squashfs
 
 import (
 	"bytes"
-	"compress/zlib"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -26,8 +25,18 @@ const (
 // BuildOptions configures image creation.
 type BuildOptions struct {
 	// Uncompressed stores metadata and data blocks without compression.
-	// When false (default) gzip (zlib) is used.
+	// When set it overrides Compressor.
 	Uncompressed bool
+
+	// Compressor selects the block compressor. The zero value is gzip
+	// (zlib), matching mksquashfs's default. Ignored when Uncompressed is set.
+	Compressor Compressor
+
+	// NoFragments disables fragment packing, reverting to the legacy behaviour
+	// where every regular file is stored as full data blocks. When false
+	// (default) the tails of files smaller than one block, and whole sub-block
+	// files, are packed into shared fragment blocks to shrink the image.
+	NoFragments bool
 }
 
 // node is an in-memory tree element used while building an image.
@@ -123,11 +132,16 @@ func scanEntry(path, name string) (*node, error) {
 // imageWriter accumulates the on-disk image as it is built.
 type imageWriter struct {
 	opts      BuildOptions
+	comp      compressor   // block encoder (nil when Uncompressed)
 	data      bytes.Buffer // whole image; starts with the 96-byte superblock placeholder
 	inodes    *metaWriter
 	dirs      *metaWriter
 	inodeNum  uint32
 	blockSize uint32
+
+	// Fragment packing state (used unless opts.NoFragments).
+	fragBuf     []byte          // pending uncompressed fragment block payload
+	fragEntries []fragmentEntry // emitted fragment blocks (one per table entry)
 }
 
 // metaWriter buffers metadata and emits 8 KiB blocks (each: 2-byte header +
@@ -172,25 +186,29 @@ func (m *metaWriter) emit(payload []byte) {
 }
 
 // compress returns the stored bytes and whether they are compressed. It falls
-// back to storing raw when compression does not shrink the block (matching
-// mksquashfs / what the reader expects).
+// back to storing raw when compression fails or does not shrink the block
+// (matching mksquashfs / what the reader expects).
 func (iw *imageWriter) compress(payload []byte, forceRaw bool) (stored []byte, compressed bool) {
-	if forceRaw {
+	if forceRaw || iw.comp == nil || len(payload) == 0 {
 		return payload, false
 	}
-	var b bytes.Buffer
-	zw := zlib.NewWriter(&b)
-	zw.Write(payload)
-	zw.Close()
-	if b.Len() >= len(payload) {
-		return payload, false // no gain — store raw
+	out, err := iw.comp.compress(payload)
+	if err != nil || len(out) >= len(payload) {
+		return payload, false // no gain (or incompressible) — store raw
 	}
-	return b.Bytes(), true
+	return out, true
 }
 
 // buildImage lays out and returns a complete SquashFS image for the tree.
 func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 	iw := &imageWriter{opts: opts, blockSize: defaultBlockSize}
+	if !opts.Uncompressed {
+		c, err := newCompressor(opts.Compressor)
+		if err != nil {
+			return nil, err
+		}
+		iw.comp = c
+	}
 	iw.inodes = &metaWriter{iw: iw}
 	iw.dirs = &metaWriter{iw: iw}
 
@@ -201,6 +219,8 @@ func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 	if err := iw.emitNode(root); err != nil {
 		return nil, err
 	}
+	// Flush any remaining packed fragment data before the metadata tables.
+	iw.flushFragment()
 	rootRef := root.inodeRef
 	inodeCount := iw.inodeNum
 
@@ -211,6 +231,13 @@ func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 	iw.data.Write(iw.inodes.out.Bytes())
 	dirTableStart := uint64(iw.data.Len())
 	iw.data.Write(iw.dirs.out.Bytes())
+
+	// Fragment table: one or more metadata blocks of 16-byte entries, then a
+	// flat array of u64 metadata-block offsets. Absent when no fragments.
+	fragTableStart := bytesUsedNoTable
+	if len(iw.fragEntries) > 0 {
+		fragTableStart = iw.writeFragmentTable()
+	}
 
 	// ID table: one metadata block holding the single id value (0), then a
 	// u64 index pointing at that block.
@@ -225,10 +252,47 @@ func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 	bytesUsed := uint64(iw.data.Len())
 
 	// Patch the superblock.
-	sb := iw.superblock(rootRef, inodeCount, inodeTableStart, dirTableStart, idTableStart, bytesUsed)
+	sb := iw.superblock(rootRef, inodeCount, inodeTableStart, dirTableStart,
+		idTableStart, fragTableStart, uint32(len(iw.fragEntries)), bytesUsed)
 	out := iw.data.Bytes()
 	copy(out[:superblockSize], sb)
 	return out, nil
+}
+
+// bytesUsedNoTable is the FragTableStart value written when there are no
+// fragments; mksquashfs points it just past the data, the reader ignores it
+// when FragCount is 0.
+const bytesUsedNoTable = ^uint64(0)
+
+// writeFragmentTable writes the fragment entries (16-byte records packed into
+// metadata blocks) followed by a u64 index of block offsets, and returns the
+// index start (the FragTableStart superblock field).
+func (iw *imageWriter) writeFragmentTable() uint64 {
+	le := binary.LittleEndian
+	var blockOffsets []uint64
+	for i := 0; i < len(iw.fragEntries); i += fragPerMetaBlock {
+		end := i + fragPerMetaBlock
+		if end > len(iw.fragEntries) {
+			end = len(iw.fragEntries)
+		}
+		blockOffsets = append(blockOffsets, uint64(iw.data.Len()))
+		payload := make([]byte, 0, (end-i)*fragEntrySize)
+		for _, fe := range iw.fragEntries[i:end] {
+			var rec [fragEntrySize]byte
+			le.PutUint64(rec[0:], fe.start)
+			le.PutUint32(rec[8:], fe.sizeWord)
+			// rec[12:16] unused (0)
+			payload = append(payload, rec[:]...)
+		}
+		iw.writeMetaBlock(payload)
+	}
+	start := uint64(iw.data.Len())
+	for _, off := range blockOffsets {
+		var b [8]byte
+		le.PutUint64(b[:], off)
+		iw.data.Write(b[:])
+	}
+	return start
 }
 
 // writeMetaBlock appends a single standalone metadata block to the image.
@@ -265,18 +329,37 @@ func (iw *imageWriter) emitNode(n *node) error {
 
 func (iw *imageWriter) nextInode() uint32 { iw.inodeNum++; return iw.inodeNum }
 
-// emitFileInode writes a file's data blocks then its basic-file inode.
+// emitFileInode writes a file's data blocks then its basic-file inode. When
+// fragment packing is enabled the trailing partial block (size mod blockSize)
+// is appended to a shared fragment block instead of a full data block.
 func (iw *imageWriter) emitFileInode(n *node) error {
+	useFrag := !iw.opts.NoFragments
+	bs := int(iw.blockSize)
+
+	// Number of bytes stored as full data blocks. With fragments enabled this
+	// is floor(size/blockSize)*blockSize, leaving the remainder for a fragment;
+	// otherwise the whole file is full blocks (last one short).
+	fullLen := len(n.data)
+	if useFrag {
+		fullLen = (len(n.data) / bs) * bs
+	}
+
 	blocksStart := uint64(iw.data.Len())
 	var blockSizes []uint32
-	for off := 0; off < len(n.data); off += int(iw.blockSize) {
-		end := off + int(iw.blockSize)
-		if end > len(n.data) {
-			end = len(n.data)
+	for off := 0; off < fullLen; off += bs {
+		end := off + bs
+		if end > fullLen {
+			end = fullLen
 		}
-		sz := iw.writeDataBlock(n.data[off:end])
-		blockSizes = append(blockSizes, sz)
+		blockSizes = append(blockSizes, iw.writeDataBlock(n.data[off:end]))
 	}
+
+	fragIdx := uint32(invalidFrag)
+	fragOffset := uint32(0)
+	if useFrag && fullLen < len(n.data) {
+		fragIdx, fragOffset = iw.addToFragment(n.data[fullLen:])
+	}
+
 	n.inodeNum = iw.nextInode()
 	n.inodeRef = iw.inodes.ref()
 
@@ -289,8 +372,8 @@ func (iw *imageWriter) emitFileInode(n *node) error {
 	le.PutUint32(hdr[8:], 0) // mtime
 	le.PutUint32(hdr[12:], n.inodeNum)
 	le.PutUint32(hdr[16:], uint32(blocksStart)) // start_block (32-bit)
-	le.PutUint32(hdr[20:], invalidFrag)         // no fragment
-	le.PutUint32(hdr[24:], 0)                   // fragment offset
+	le.PutUint32(hdr[20:], fragIdx)             // fragment table index
+	le.PutUint32(hdr[24:], fragOffset)          // offset within fragment block
 	le.PutUint32(hdr[28:], uint32(len(n.data))) // file_size
 	body := hdr
 	for _, s := range blockSizes {
@@ -300,6 +383,34 @@ func (iw *imageWriter) emitFileInode(n *node) error {
 	}
 	iw.inodes.write(body)
 	return nil
+}
+
+// addToFragment appends tail to the current fragment block, flushing first if
+// it would overflow blockSize, and returns the (fragmentIndex, offset) for the
+// file inode. The fragment index is the entry the block will occupy once
+// emitted: flushed blocks become entries in order, so the index equals the
+// number of already-emitted entries plus (when the buffer is non-empty) one for
+// the block now being accumulated.
+func (iw *imageWriter) addToFragment(tail []byte) (idx, offset uint32) {
+	if len(iw.fragBuf)+len(tail) > int(iw.blockSize) {
+		iw.flushFragment()
+	}
+	offset = uint32(len(iw.fragBuf))
+	idx = uint32(len(iw.fragEntries)) // entry index of the in-progress block
+	iw.fragBuf = append(iw.fragBuf, tail...)
+	return idx, offset
+}
+
+// flushFragment writes the pending fragment block (if any) as one data block
+// and records its fragment-table entry.
+func (iw *imageWriter) flushFragment() {
+	if len(iw.fragBuf) == 0 {
+		return
+	}
+	start := uint64(iw.data.Len())
+	sz := iw.writeDataBlock(iw.fragBuf)
+	iw.fragEntries = append(iw.fragEntries, fragmentEntry{start: start, sizeWord: sz})
+	iw.fragBuf = iw.fragBuf[:0]
 }
 
 // writeDataBlock appends one (optionally compressed) data block and returns its
@@ -348,7 +459,7 @@ func (iw *imageWriter) emitDirInode(n *node) error {
 	le.PutUint16(body[0:], inodeBasicDir)
 	le.PutUint16(body[2:], n.mode&0o7777)
 	le.PutUint32(body[12:], n.inodeNum)
-	le.PutUint32(body[16:], dirBlock)              // start_block (dir table)
+	le.PutUint32(body[16:], dirBlock)                  // start_block (dir table)
 	le.PutUint32(body[20:], uint32(len(n.children))+2) // nlink (entries + . + ..)
 	le.PutUint16(body[24:], uint16(len(listing)+3))    // file_size (+3 bias)
 	le.PutUint16(body[26:], dirOffset)
@@ -379,10 +490,10 @@ func (iw *imageWriter) buildDirListing(n *node) []byte {
 		out = append(out, hdr...)
 		for _, c := range n.children[i:j] {
 			e := make([]byte, 8)
-			le.PutUint16(e[0:], uint16(c.inodeRef&0xFFFF))         // offset in inode block
+			le.PutUint16(e[0:], uint16(c.inodeRef&0xFFFF))                         // offset in inode block
 			le.PutUint16(e[2:], uint16(int16(int64(c.inodeNum)-int64(baseInode)))) // inode delta
-			le.PutUint16(e[4:], dirEntryType(c.mode))              // type
-			le.PutUint16(e[6:], uint16(len(c.name)-1))             // name length - 1
+			le.PutUint16(e[4:], dirEntryType(c.mode))                              // type
+			le.PutUint16(e[6:], uint16(len(c.name)-1))                             // name length - 1
 			e = append(e, []byte(c.name)...)
 			out = append(out, e...)
 		}
@@ -405,17 +516,24 @@ func dirEntryType(mode uint16) uint16 {
 }
 
 // superblock builds the 96-byte SquashFS 4.0 superblock.
-func (iw *imageWriter) superblock(rootRef uint64, inodeCount uint32, inodeStart, dirStart, idStart, bytesUsed uint64) []byte {
+func (iw *imageWriter) superblock(rootRef uint64, inodeCount uint32, inodeStart, dirStart, idStart, fragStart uint64, fragCount uint32, bytesUsed uint64) []byte {
+	compID := uint16(compGZIP)
+	if iw.comp != nil {
+		compID = iw.comp.id()
+	}
 	le := binary.LittleEndian
 	b := make([]byte, superblockSize)
 	le.PutUint32(b[0x00:], Magic)
 	le.PutUint32(b[0x04:], inodeCount)
 	le.PutUint32(b[0x08:], 0) // mod_time
 	le.PutUint32(b[0x0C:], iw.blockSize)
-	le.PutUint32(b[0x10:], 0) // fragment count
-	le.PutUint16(b[0x14:], compGZIP)
+	le.PutUint32(b[0x10:], fragCount)
+	le.PutUint16(b[0x14:], compID)
 	le.PutUint16(b[0x16:], blockLog(iw.blockSize))
-	flags := uint16(flagNoFragments | flagNoXattrs)
+	flags := uint16(flagNoXattrs)
+	if fragCount == 0 {
+		flags |= flagNoFragments
+	}
 	if iw.opts.Uncompressed {
 		flags |= flagUncompressedInodes | flagUncompressedData
 	}
@@ -429,7 +547,7 @@ func (iw *imageWriter) superblock(rootRef uint64, inodeCount uint32, inodeStart,
 	le.PutUint64(b[0x38:], 0xFFFFFFFFFFFFFFFF) // xattr table: none
 	le.PutUint64(b[0x40:], inodeStart)
 	le.PutUint64(b[0x48:], dirStart)
-	le.PutUint64(b[0x50:], bytesUsed)          // fragment table: none (count 0)
+	le.PutUint64(b[0x50:], fragStart)          // fragment table (or sentinel when none)
 	le.PutUint64(b[0x58:], 0xFFFFFFFFFFFFFFFF) // lookup/export table: none
 	return b
 }
