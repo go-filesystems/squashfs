@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
 )
 
 // decompressor decompresses a single SquashFS block. Implementations are
@@ -37,7 +38,7 @@ func newDecompressor(compression uint16) (decompressor, error) {
 	case compLZ4:
 		return lz4Decompressor{}, nil
 	case compLZMA:
-		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
+		return lzmaDecompressor{}, nil
 	default:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompression, compression)
 	}
@@ -77,6 +78,32 @@ func (xzDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: xz read: %w", err)
+	}
+	if len(out) > maxOut {
+		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
+	}
+	return out, nil
+}
+
+// lzmaDecompressor decodes SquashFS legacy "lzma" blocks (compression id 2).
+//
+// Framing assumption: each block is a self-contained lzma_alone stream (the
+// classic .lzma container squashfs-tools' lzma_wrapper.c produces) — a 13-byte
+// header (1-byte properties, 4-byte little-endian dictionary size, 8-byte
+// little-endian uncompressed size) followed by the raw LZMA1 stream. squashfs
+// writes the true uncompressed size into the header rather than the 0xFFFF…
+// "unknown size" sentinel and emits no end-of-stream marker, so the decoder
+// stops exactly at that length. lzma.NewReader parses this header directly.
+type lzmaDecompressor struct{}
+
+func (lzmaDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
+	r, err := lzma.NewReader(bytes.NewReader(src))
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: lzma: %w", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
+	if err != nil {
+		return nil, fmt.Errorf("squashfs: lzma read: %w", err)
 	}
 	if len(out) > maxOut {
 		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
