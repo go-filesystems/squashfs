@@ -1,4 +1,10 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-filesystems/brand/main/social/go-filesystems-squashfs.png" alt="go-filesystems/squashfs" width="720"></p>
+
 # squashfs
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-filesystems/squashfs.svg)](https://pkg.go.dev/github.com/go-filesystems/squashfs)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![CI](https://github.com/go-filesystems/squashfs/actions/workflows/ci.yml/badge.svg)](https://github.com/go-filesystems/squashfs/actions/workflows/ci.yml)
 
 Pure-Go, read-only access to **SquashFS 4.0** filesystem images — no root, no external tools, no CGO.
 
