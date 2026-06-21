@@ -25,6 +25,10 @@ const (
 // superblockSize is the on-disk size of the SquashFS 4.0 superblock.
 const superblockSize = 96
 
+// sbFlagCompressorOptions is set in Superblock.Flags when a compressor-options
+// metadata block immediately follows the superblock.
+const sbFlagCompressorOptions = 0x0400
+
 // Superblock is the decoded SquashFS 4.0 superblock (little-endian on disk).
 // Field order and offsets mirror struct squashfs_super_block.
 type Superblock struct {
@@ -87,4 +91,30 @@ func readSuperblock(rs io.ReaderAt) (*Superblock, error) {
 		return nil, fmt.Errorf("%w: block_size %d != 1<<%d", ErrCorrupt, sb.BlockSize, sb.BlockLog)
 	}
 	return sb, nil
+}
+
+// readCompressorOptions validates and skips the compressor-options metadata
+// block that follows the superblock when sb.Flags advertises one. The block is
+// a standard metadata block (2-byte header + payload), almost always stored
+// uncompressed. We don't use its contents — every table is reached by absolute
+// offset — but parsing it confirms the framing is sound. A missing flag is a
+// no-op so images without options (gzip/zstd/xz) are unaffected.
+func readCompressorOptions(rs io.ReaderAt, sb *Superblock) error {
+	if sb.Flags&sbFlagCompressorOptions == 0 {
+		return nil
+	}
+	var hdr [2]byte
+	if _, err := rs.ReadAt(hdr[:], superblockSize); err != nil {
+		return fmt.Errorf("squashfs: read compressor options header: %w", err)
+	}
+	h := binary.LittleEndian.Uint16(hdr[:])
+	size := int(h &^ 0x8000) // low 15 bits = on-disk payload size
+	if size == 0 || size > metaBlockMax {
+		return fmt.Errorf("%w: compressor options block size %d", ErrCorrupt, size)
+	}
+	buf := make([]byte, size)
+	if _, err := rs.ReadAt(buf, superblockSize+2); err != nil {
+		return fmt.Errorf("squashfs: read compressor options payload: %w", err)
+	}
+	return nil
 }

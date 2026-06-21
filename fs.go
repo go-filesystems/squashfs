@@ -40,6 +40,13 @@ func Open(rs io.ReaderAt, size int64) (*FS, error) {
 	if err != nil {
 		return nil, err
 	}
+	// When the superblock advertises a compressor-options block it sits
+	// immediately after the superblock. All tables are addressed by absolute
+	// offset, so we don't need its contents, but parse it to validate framing
+	// and to skip past it cleanly (mksquashfs writes one for LZ4).
+	if err := readCompressorOptions(rs, sb); err != nil {
+		return nil, err
+	}
 	fs := &FS{rs: rs, size: size, sb: sb, d: d}
 	if c, ok := rs.(io.Closer); ok {
 		fs.closer = c
