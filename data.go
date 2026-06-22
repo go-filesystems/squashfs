@@ -6,6 +6,8 @@ package squashfs
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/go-volumes/safeio"
 )
 
 // dataUncompressedBit, when SET in a data/fragment block size word, marks the
@@ -39,10 +41,31 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 
 // readFile assembles the full contents of regular-file inode in.
 func readFile(fs *FS, in *inode) ([]byte, error) {
-	out := make([]byte, 0, in.Size)
 	blockSize := uint64(fs.sb.BlockSize)
 	off := int64(in.blocksStart)
 	remaining := in.Size
+
+	// Bound the pre-allocation hint. in.Size is attacker-controlled — for an
+	// extended-file inode it is a raw on-disk u64 (inode.go), so a crafted
+	// image can declare Size = 2^60 and OOM the host on this make() alone,
+	// even though the block list and every block are independently capped.
+	// The real assembled length can never exceed the bytes the block list
+	// plus a single tail fragment can supply: len(blockSizes) full blocks +
+	// one more block of fragment slack. (We cannot clamp by the image size:
+	// the format is compressed, so a few KiB of image legitimately expand to
+	// many blocks.) Clamp the capacity hint to that ceiling and reject
+	// anything beyond it up front, so we neither over-allocate nor silently
+	// truncate — the exact length is still re-verified after assembly.
+	maxBytes := (uint64(len(in.blockSizes)) + 1) * blockSize
+	if in.Size > maxBytes {
+		return nil, fmt.Errorf("%w: file size %d exceeds %d reachable bytes",
+			ErrCorrupt, in.Size, maxBytes)
+	}
+	hint, err := safeio.MakeBytes(int64(in.Size), int64(maxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+	}
+	out := hint[:0]
 
 	for _, sz := range in.blockSizes {
 		want := blockSize
@@ -94,7 +117,7 @@ type fragmentEntry struct {
 	sizeWord uint32 // block size word (compressed bit + on-disk length)
 }
 
-const fragEntrySize = 16   // start(8) + size(4) + unused(4)
+const fragEntrySize = 16 // start(8) + size(4) + unused(4)
 const fragPerMetaBlock = metaBlockMax / fragEntrySize
 
 // readFragmentEntry reads fragment-table entry idx via the two-level table:

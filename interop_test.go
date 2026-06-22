@@ -134,9 +134,9 @@ func TestInterop_MksquashfsRead(t *testing.T) {
 	}
 
 	src := t.TempDir()
-	small := []byte("hello squashfs\n")                  // tail-packed into a fragment
-	big := pattern(300000)                                // 2 full 128K blocks + fragment tail
-	exact := pattern(131072)                              // exactly one full block, no fragment
+	small := []byte("hello squashfs\n") // tail-packed into a fragment
+	big := pattern(300000)              // 2 full 128K blocks + fragment tail
+	exact := pattern(131072)            // exactly one full block, no fragment
 	nested := []byte("a file in a sub-directory\n")
 	files := map[string][]byte{
 		"small.txt":      small,
