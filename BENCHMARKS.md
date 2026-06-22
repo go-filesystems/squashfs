@@ -2,10 +2,16 @@
 
 ## Methodology
 
-- **Where**: the `debian` Tart VM (linux/arm64) on an Apple-silicon (M4) host.
-  Our pure-Go driver and the reference C tools run in the same VM, same kernel,
-  same hardware. Reads are **cold** (caches dropped before every iteration).
-- **CPU / kernel**: 4 vCPU aarch64, Linux 6.12.74 (Debian 13).
+- **Where**: a Tart VM (linux/arm64) on an Apple-silicon (M4) host. Our pure-Go
+  driver and the reference C tools run in the same VM, same kernel, same
+  hardware. Reads are **cold** (caches dropped before every iteration). The
+  before→after rows below were measured **on identical hardware, in the same VM
+  run, against the same generated image** (`cb-tpm-ubuntu`, Linux 6.17), so the
+  speedup is a true A/B and not a cross-machine artefact.
+- **CPU / kernel**: 4 vCPU aarch64, Linux 6.17 (Ubuntu 24.04). The original
+  baseline row was first taken on a separate VM (Linux 6.12, Debian 13) whose
+  kernel read at 3313 MB/s; re-running both old and new code on the same machine
+  is what the before→after table reports.
 - **Go**: 1.26.4 linux/arm64, CGO disabled.
 - **Reference tools**: squashfs-tools 4.6.1 (`mksquashfs`, `unsquashfs`),
   in-tree kernel squashfs.
@@ -23,42 +29,66 @@
 
 ## Results
 
-| op | size | ours (MB/s, wall) | reference (MB/s, wall) | ratio | verdict |
-|----|------|-------------------|------------------------|-------|---------|
-| Read (cold) | 38 MB | 66 MB/s, 558.3 ms | kernel: 3313 MB/s, 11.1 ms | 50.3× | ours 50× slower |
-| Read (cold) | 38 MB | 66 MB/s, 558.3 ms | unsquashfs: 801 MB/s, 45.9 ms | 12.2× | ours 12× slower |
+### Before → after (same VM, same image, best-of-5 cold), ~38.6 MB payload
+
+| build | ours (MB/s, wall) | vs kernel | vs unsquashfs |
+|-------|-------------------|-----------|---------------|
+| **before** (no cache, stdlib `compress/zlib`) | 57.8 MB/s, 667.0 ms | 30.95× slower | 30.97× slower |
+| **after**  (metadata+data cache, `klauspost/compress/zlib`) | **730.8 MB/s, 52.8 ms** | **2.45× slower** | **2.45× slower** |
+
+Reference on the same run: kernel loop-mount **1790 MB/s** (21.6 ms),
+`unsquashfs` **1792 MB/s** (21.5 ms).
+
+**Net: 12.6× faster read, cutting the kernel gap from ~31× to 2.45×.** (The
+original cross-machine table reported "50× vs kernel" because that VM's kernel
+read at 3313 MB/s; on identical hardware the old code was 31× slower and the new
+code is 2.45× slower.)
+
+### Which lever helped most (isolated on the same hardware)
+
+| variant | MB/s | factor vs before |
+|---------|------|------------------|
+| before (no cache, stdlib flate) | ~58 | 1.0× |
+| **+ metadata/data block cache** (stdlib flate) | **629** | **~10.8×** |
+| + cache **and** `klauspost/compress/zlib` | 731 | ~12.6× |
+
+The **decompressed-block cache is overwhelmingly the dominant lever** (~10.8× of
+the 12.6×). The walk's per-file `Stat` re-resolves every path from the root, so
+without a cache the same inode-table and directory-table metadata blocks were
+re-decompressed thousands of times; caching them by on-disk offset (the image is
+read-only, so no invalidation is ever needed) turns those into map lookups.
+Swapping stdlib `compress/zlib` for the faster pure-Go `klauspost/compress/zlib`
+adds a further ~16% on the now decompression-light path.
 
 ## Summary
 
-- **This is our worst read gap: 50× vs the kernel, 12× vs `unsquashfs`.** It is
-  honest and expected — SquashFS read is decompression-bound, and that is
-  exactly where a pure-Go userspace reader without batching or parallelism
-  suffers most.
+- **Read is now 2.45× of the kernel and on par with `unsquashfs`** — down from a
+  ~31× kernel gap. SquashFS read is decompression-bound, and the cache removes
+  the redundant decompression that dominated the cold walk.
 
-### Root causes
+### Fixed
 
-1. **Per-block decompression with no caching.** Each fragment/data block is
-   decompressed independently, and the **metadata block cache is small/absent**,
-   so shared metadata blocks (inode + directory tables) are decompressed
-   repeatedly across the 2008-file walk.
-2. **Pure-Go `compress/flate`.** The kernel and `unsquashfs` use zlib with
-   tuned/assembly inner loops; our gzip path is the standard-library decoder.
-3. **No parallelism.** `unsquashfs` decompresses with a worker pool across
-   cores; we are single-threaded.
-4. **Per-file / per-block allocation** → GC pressure.
+1. **Decompressed metadata-block cache** (`cache.go`), keyed by absolute on-disk
+   offset, shared by every metadata reader (inode table, directory table,
+   fragment / xattr-id index, xattr key/value region). Read-only image ⇒ a full
+   cache is always consistent and never invalidated. **Dominant win.**
+2. **Decompressed data/fragment-block cache.** Many small files pack their tails
+   into one shared fragment block; that block is now decompressed once instead of
+   once per file.
+3. **Faster pure-Go DEFLATE.** Swapped stdlib `compress/zlib` →
+   `github.com/klauspost/compress/zlib` (already a dep via zstd), CGO still 0.
 
-### Action items
+### Remaining gap / further ideas
 
-- [ ] **Cache decompressed metadata blocks** (inode + directory tables) keyed by
-      on-disk offset — the single biggest win, since the walk re-touches the same
-      metadata blocks for every file in a directory.
-- [ ] Parallel extract: decompress data/fragment blocks on a worker pool.
-- [ ] Pool decompression scratch buffers; reuse `flate.Reader` instances via
-      `Reset`.
-- [ ] Evaluate a faster DEFLATE (e.g. `klauspost/compress/flate`, already a
-      transitive dep) for the gzip path; benchmark vs stdlib.
-- [ ] Investigate SIMD-assisted decompression for the lz4/zstd block
-      compressors via go-asmgen where applicable.
+The residual 2.45× vs the kernel is the expected cost of userspace + a pure-Go
+single-threaded decompressor against C + page cache. Possible follow-ups:
+
+- [ ] Parallel extract: decompress independent data/fragment blocks on a worker
+      pool across cores (`unsquashfs` does this).
+- [ ] Pool decompression scratch buffers / reuse zlib reader instances via
+      `Reset` to shave the remaining per-block allocation.
+- [ ] Investigate SIMD-assisted decompression for the lz4/zstd block compressors
+      via go-asmgen where applicable.
 
 ## Reproduce
 

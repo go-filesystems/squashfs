@@ -23,6 +23,7 @@ type FS struct {
 	sb     *Superblock
 	d      decompressor
 	closer io.Closer
+	cache  *blockCache // decompressed metadata + data/fragment block cache
 }
 
 // Verify the package satisfies the common filesystem interface.
@@ -47,7 +48,7 @@ func Open(rs io.ReaderAt, size int64) (*FS, error) {
 	if err := readCompressorOptions(rs, sb); err != nil {
 		return nil, err
 	}
-	fs := &FS{rs: rs, size: size, sb: sb, d: d}
+	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache()}
 	if c, ok := rs.(io.Closer); ok {
 		fs.closer = c
 	}

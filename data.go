@@ -21,6 +21,13 @@ func blockOnDiskSize(sz uint32) (n uint32, compressed bool) {
 
 // readBlock reads and (if needed) decompresses one data block of at most
 // blockSize bytes located at absolute file offset off.
+//
+// Decompressed compressed blocks are cached keyed by their on-disk offset. The
+// dominant beneficiary is fragment blocks: many small files pack their tails
+// into the same shared fragment block, so without caching that one block is
+// re-read and re-decompressed once per file. Callers only ever read from (and
+// copy out of) the returned slice, so handing back the cache-owned slice is
+// safe for the read-only image.
 func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	n, compressed := blockOnDiskSize(sizeWord)
 	if n == 0 {
@@ -29,6 +36,11 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	if n > fs.sb.BlockSize && !compressed {
 		return nil, fmt.Errorf("%w: data block %d > block size %d", ErrCorrupt, n, fs.sb.BlockSize)
 	}
+	if compressed {
+		if b, ok := fs.cache.getData(off); ok {
+			return b, nil
+		}
+	}
 	raw := make([]byte, n)
 	if _, err := fs.rs.ReadAt(raw, off); err != nil {
 		return nil, fmt.Errorf("squashfs: read data block @%d: %w", off, err)
@@ -36,7 +48,12 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	if !compressed {
 		return raw, nil
 	}
-	return fs.d.decompress(raw, int(fs.sb.BlockSize))
+	out, err := fs.d.decompress(raw, int(fs.sb.BlockSize))
+	if err != nil {
+		return nil, err
+	}
+	fs.cache.putData(off, out)
+	return out, nil
 }
 
 // readFile assembles the full contents of regular-file inode in.
@@ -135,7 +152,7 @@ func (fs *FS) readFragmentEntry(idx uint32) (fragmentEntry, error) {
 		return fragmentEntry{}, fmt.Errorf("squashfs: read frag index: %w", err)
 	}
 	metaOff := int64(binary.LittleEndian.Uint64(ptr[:]))
-	block, _, err := readMetaBlock(fs.rs, fs.d, metaOff)
+	block, _, err := fs.readMetaBlockCached(metaOff)
 	if err != nil {
 		return fragmentEntry{}, err
 	}

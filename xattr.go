@@ -94,7 +94,7 @@ func (fs *FS) readXattrIDEntry(t *xattrTable, idx uint32) (xattrIDEntry, error) 
 	if blockIdx >= len(t.idBlocks) {
 		return xattrIDEntry{}, fmt.Errorf("%w: xattr id block %d past index", ErrCorrupt, blockIdx)
 	}
-	block, _, err := readMetaBlock(fs.rs, fs.d, t.idBlocks[blockIdx])
+	block, _, err := fs.readMetaBlockCached(t.idBlocks[blockIdx])
 	if err != nil {
 		return xattrIDEntry{}, err
 	}
@@ -115,7 +115,7 @@ func (fs *FS) readXattrIDEntry(t *xattrTable, idx uint32) (xattrIDEntry, error) 
 // attributes as fully-qualified names (namespace prefix restored).
 func (fs *FS) readXattrPairs(t *xattrTable, e xattrIDEntry) (map[string][]byte, error) {
 	blockOff, inBlockOff := inodeRef(e.ref)
-	c, err := newMetaCursor(fs.rs, fs.d, t.kvStart+blockOff, inBlockOff)
+	c, err := newMetaCursor(fs, t.kvStart+blockOff, inBlockOff)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +179,7 @@ func (fs *FS) readXattrPairs(t *xattrTable, e xattrIDEntry) (map[string][]byte, 
 // offset, relative to the kv region start): a vsize(u32) followed by the bytes.
 func (fs *FS) readXattrValueAt(t *xattrTable, ref uint64) ([]byte, error) {
 	blockOff, inBlockOff := inodeRef(ref)
-	c, err := newMetaCursor(fs.rs, fs.d, t.kvStart+blockOff, inBlockOff)
+	c, err := newMetaCursor(fs, t.kvStart+blockOff, inBlockOff)
 	if err != nil {
 		return nil, err
 	}

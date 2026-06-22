@@ -105,7 +105,7 @@ func blockCount(fileSize uint64, blockSize uint32, hasFrag bool) int {
 // readInode resolves an inode reference and decodes the inode.
 func readInode(fs *FS, ref uint64) (*inode, error) {
 	blockOff, inBlockOff := inodeRef(ref)
-	c, err := newMetaCursor(fs.rs, fs.d, int64(fs.sb.InodeTableStart)+blockOff, inBlockOff)
+	c, err := newMetaCursor(fs, int64(fs.sb.InodeTableStart)+blockOff, inBlockOff)
 	if err != nil {
 		return nil, err
 	}

@@ -5,11 +5,11 @@ package squashfs
 
 import (
 	"bytes"
-	"compress/zlib"
 	"fmt"
 	"io"
 
 	lzo "github.com/anchore/go-lzo"
+	"github.com/klauspost/compress/zlib"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"

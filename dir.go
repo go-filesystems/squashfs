@@ -23,7 +23,7 @@ func readDir(fs *FS, dir *inode) ([]dirEntry, error) {
 	if dir.Size == 0 {
 		return nil, nil
 	}
-	c, err := newMetaCursor(fs.rs, fs.d,
+	c, err := newMetaCursor(fs,
 		int64(fs.sb.DirTableStart)+int64(dir.dirStartBlock), int(dir.dirOffset))
 	if err != nil {
 		return nil, err

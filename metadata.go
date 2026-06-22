@@ -16,6 +16,23 @@ const metaBlockMax = 8192
 // means the block payload is compressed; when SET, the payload is stored raw.
 const metaHeaderCompressedBit = 0x8000
 
+// readMetaBlockCached returns a decompressed metadata block at absolute file
+// offset at, serving it from the per-open cache when possible. Because the image
+// is read-only the block at a given offset is immutable, so the cache never
+// needs invalidation. The returned slice is the cached backing array and must
+// not be mutated (all callers copy out via metaCursor or by slicing reads).
+func (fs *FS) readMetaBlockCached(at int64) (data []byte, next int64, err error) {
+	if e, ok := fs.cache.getMeta(at); ok {
+		return e.data, e.next, nil
+	}
+	data, next, err = readMetaBlock(fs.rs, fs.d, at)
+	if err != nil {
+		return nil, 0, err
+	}
+	fs.cache.putMeta(at, metaEntry{data: data, next: next})
+	return data, next, nil
+}
+
 // readMetaBlock reads one metadata block starting at absolute file offset at.
 // It returns the (decompressed) payload and the file offset of the next block.
 func readMetaBlock(rs io.ReaderAt, d decompressor, at int64) (data []byte, next int64, err error) {
@@ -48,17 +65,16 @@ func readMetaBlock(rs io.ReaderAt, d decompressor, at int64) (data []byte, next 
 // addressed by a reference: the byte offset of a metadata block (relative to a
 // table start) plus a byte offset inside that block's decompressed payload.
 type metaCursor struct {
-	rs   io.ReaderAt
-	d    decompressor
+	fs   *FS
 	next int64  // absolute file offset of the next block to load
-	cur  []byte // current decompressed block
+	cur  []byte // current decompressed block (cache-owned: read-only)
 	pos  int    // read position within cur
 }
 
 // newMetaCursor positions a cursor at inBlockOff bytes into the metadata block
 // located at absolute file offset blockStart.
-func newMetaCursor(rs io.ReaderAt, d decompressor, blockStart int64, inBlockOff int) (*metaCursor, error) {
-	c := &metaCursor{rs: rs, d: d, next: blockStart}
+func newMetaCursor(fs *FS, blockStart int64, inBlockOff int) (*metaCursor, error) {
+	c := &metaCursor{fs: fs, next: blockStart}
 	if err := c.load(); err != nil {
 		return nil, err
 	}
@@ -70,7 +86,7 @@ func newMetaCursor(rs io.ReaderAt, d decompressor, blockStart int64, inBlockOff 
 }
 
 func (c *metaCursor) load() error {
-	data, next, err := readMetaBlock(c.rs, c.d, c.next)
+	data, next, err := c.fs.readMetaBlockCached(c.next)
 	if err != nil {
 		return err
 	}
