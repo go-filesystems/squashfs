@@ -23,7 +23,7 @@ parses an image produced by `mksquashfs` and exposes it through the shared
 | Stat | ✅ | mode (type + perms), size, inode number |
 | ReadLink / Symlinks | ✅ | Targets read; followed during path resolution |
 | Compression — gzip / xz / zstd / lzo / lz4 | ✅ | gzip (zlib), xz (LZMA2, no BCJ), zstd, LZO1X, LZ4 |
-| Compression — lzma (legacy) | ⏳ | Returns `ErrUnsupportedCompression` |
+| Compression — lzma (legacy) | ✅ | Standalone LZMA1 stream decoded |
 | Create image (`BuildFromDir`) | ✅ | Build a SquashFS 4.0 image from a tree; gzip or uncompressed; `unsquashfs`-readable |
 | In-place writes (`WriteFile`/`MkDir`/…) | ❌ | The archive is immutable once written; mutators return `ErrReadOnly` |
 
@@ -54,8 +54,8 @@ err = squashfs.BuildFromDir("out.squashfs", "/path/to/tree", squashfs.BuildOptio
 
 ## Limitations
 
-- Reading: gzip, xz, zstd, LZO and lz4 blocks are decoded; only legacy standalone
-  lzma is not (returns `ErrUnsupportedCompression`). xz with BCJ filters is unsupported.
+- Reading: gzip, xz, zstd, LZO, lz4 and legacy standalone lzma blocks are all
+  decoded. xz with BCJ filters is unsupported.
 - Writing (`BuildFromDir`): produces gzip or uncompressed images; files are
   stored as full data blocks (no tail-end fragment packing yet), all owned by
   uid/gid 0, no xattrs. Once written, an image is immutable (no in-place edits).

@@ -23,8 +23,8 @@ type decompressor interface {
 }
 
 // newDecompressor returns the decompressor for the given compression id.
-// Only gzip (zlib stream) is implemented so far — it is mksquashfs's default;
-// the other compressors return ErrUnsupportedCompression until added.
+// gzip (zlib, mksquashfs's default), xz, lzo, zstd, lz4 and legacy lzma are
+// all decoded; any other compression id returns ErrUnsupportedCompression.
 func newDecompressor(compression uint16) (decompressor, error) {
 	switch compression {
 	case compGZIP:
