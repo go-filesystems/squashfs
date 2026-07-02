@@ -29,10 +29,14 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     env:
       # Coverage floor on the combined (-coverpkg=./...) profile. The pure-Go
-      # decoder/encoder path measures 77.7% with mksquashfs absent; installing
+      # decoder/encoder path measures 84.8% with mksquashfs absent; installing
       # squashfs-tools below only raises it, so the floor stays safely met
-      # while still catching regressions.
-      COVERAGE_FLOOR: "77.0"
+      # while still catching regressions. The residual gap to 100% is
+      # dominated by per-compressor happy-paths (lzo/lz4/xz/zstd blocks need
+      # real compressor-specific fixtures) and inode-type / write error
+      # branches that require hand-forged images; those are tracked separately
+      # rather than faked here.
+      COVERAGE_FLOOR: "84.0"
     steps:
       - name: Checkout squashfs
         uses: actions/checkout@v4
