@@ -55,28 +55,6 @@ type squashfsFile struct {
 
 var _ filesystem.File = (*squashfsFile)(nil)
 
-// blockOnDiskBytes returns the on-disk length of a data block, as an int64,
-// masking the uncompressed flag in 64-BIT width.
-//
-// It exists because the obvious 32-bit form — `n, _ := blockOnDiskSize(sz)`
-// followed by `off += int64(n)` — is miscompiled on ppc64le. `sz &^ (1<<24)`
-// on a uint32 lowers to `rlwinm RA,RS,0,8,6`, and MB=8 > ME=6 makes that a
-// WRAPPED mask: on a 64-bit implementation it covers the high word too, and
-// the rotate operand is the 32-bit value concatenated with itself, so the
-// result is the value duplicated into both halves. Widening it to int64
-// without re-materialising a zero-extension then adds n*(2^32+1) instead of n.
-//
-// This is not hypothetical. On the emulated ppc64le CI leg, the second block
-// of a three-block file came back at offset 862<<32|958 instead of 958, and
-// the read failed with EOF; every other architecture was correct. readFile in
-// data.go escapes the same shape only by accident — its n happens to be
-// spilled and reloaded with a zero-extending lwz. Masking in 64-bit width
-// emits no rlwinm at all, so the hazard cannot recur here whatever the
-// register allocator does.
-func blockOnDiskBytes(sz uint32) int64 {
-	return int64(sz) &^ int64(dataUncompressedBit)
-}
-
 // OpenFile opens the regular file at path for random access, following
 // symlinks exactly as ReadFile does.
 //

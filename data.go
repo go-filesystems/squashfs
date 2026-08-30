@@ -14,9 +14,52 @@ import (
 // block as stored uncompressed; the low 24 bits hold the on-disk byte length.
 const dataUncompressedBit = 1 << 24
 
+// blockOnDiskBytes returns the on-disk length of a data block, as an int64,
+// clearing the uncompressed flag in 64-BIT width.
+//
+// The width is the whole point of this function, and it is not a matter of
+// taste. The obvious 32-bit form — `sz &^ (1<<24)` on a uint32 — lowers on
+// ppc64le to a single rotate-and-mask:
+//
+//	RLWINM R14,$0,$8,$6,R15		// rlwinm RA,RS,0,8,6
+//
+// and MB=8 is GREATER than ME=6, which makes that a WRAPPED mask. Per the
+// Power ISA, rlwinm on a 64-bit implementation rotates RS[32:63] concatenated
+// with ITSELF, then masks the result with MASK(mb+32, me+32); when mb > me
+// that mask wraps, covering bits 0..38 and 40..63 — the high word included.
+// So the register holds the 32-bit value duplicated into BOTH halves, not a
+// zero-extended uint32. Widen that to int64 without re-materialising a
+// zero-extension and an offset advances by n*(2^32+1) instead of by n.
+//
+// This is not hypothetical. On the emulated ppc64le CI leg the second block of
+// a three-block file came back at offset 862<<32|958 instead of 958, and the
+// read failed with EOF; every other architecture was correct.
+//
+// Nor is the 32-bit form safe merely because it happens to work today. Before
+// this helper became the only masker in the package, readFile escaped the very
+// same instruction by accident: the compiler chose to spill the result with a
+// 32-bit MOVW and reload it with a zero-extending MOVWZ (lwz), which threw the
+// corrupted high half away. That is a register-allocation coincidence, not a
+// guarantee — an unrelated edit that lowers register pressure enough to keep
+// the value live in a register reintroduces the bug silently, on one
+// architecture, with no source change to blame.
+//
+// Masking at 64-bit width emits no rlwinm at all, so no choice the register
+// allocator makes can bring the hazard back. Do NOT "simplify" this to a
+// uint32 mask, and do not reintroduce a uint32-typed block length that a
+// caller might widen.
+func blockOnDiskBytes(sz uint32) int64 {
+	return int64(sz) &^ int64(dataUncompressedBit)
+}
+
 // blockOnDiskSize returns (storedBytes, compressed) for a data-block size word.
-func blockOnDiskSize(sz uint32) (n uint32, compressed bool) {
-	return sz &^ dataUncompressedBit, sz&dataUncompressedBit == 0
+//
+// storedBytes is an int64, not a uint32, deliberately: it is masked in 64-bit
+// width for the reason spelled out on blockOnDiskBytes, and returning it wide
+// is what keeps a caller from widening a 32-bit mask result itself. A 24-bit
+// length always fits, so nothing is lost.
+func blockOnDiskSize(sz uint32) (n int64, compressed bool) {
+	return blockOnDiskBytes(sz), sz&dataUncompressedBit == 0
 }
 
 // readBlock reads and (if needed) decompresses one data block of at most
@@ -33,7 +76,7 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	if n == 0 {
 		return nil, nil // sparse: caller zero-fills
 	}
-	if n > fs.sb.BlockSize && !compressed {
+	if n > int64(fs.sb.BlockSize) && !compressed {
 		return nil, fmt.Errorf("%w: data block %d > block size %d", ErrCorrupt, n, fs.sb.BlockSize)
 	}
 	if compressed {
@@ -102,7 +145,7 @@ func readFile(fs *FS, in *inode) ([]byte, error) {
 				return nil, fmt.Errorf("%w: short data block (%d < %d)", ErrCorrupt, len(data), want)
 			}
 			out = append(out, data[:want]...)
-			off += int64(n)
+			off += n
 		}
 		remaining -= want
 	}
