@@ -19,6 +19,7 @@ parses an image produced by `mksquashfs` and exposes it through the shared
 |---|---:|---|
 | Open / Close | ✅ | SquashFS 4.0 superblock; validates magic + version |
 | ReadFile | ✅ | Data blocks + tail-end fragments + sparse blocks |
+| Read at an offset | ✅ | `(*FS).OpenFile(path)` → `io.ReaderAt` + `Size()` (`filesystem.Opener` / `filesystem.File`); decompresses only the blocks a range touches, through the shared block cache |
 | ListDir | ✅ | Multi-header directories (no `.`/`..` — SquashFS omits them) |
 | Stat | ✅ | mode (type + perms), size, inode number |
 | ReadLink / Symlinks | ✅ | Targets read; followed during path resolution |
@@ -51,6 +52,44 @@ entries, err := fs.ListDir("/")
 // Create an image from a directory tree (gzip by default).
 err = squashfs.BuildFromDir("out.squashfs", "/path/to/tree", squashfs.BuildOptions{})
 ```
+
+### Reading part of a file
+
+`ReadFile` returns the whole file, which is no use to anything serving reads on
+demand — a mount, an NFS or 9P export — where a 4 KiB request out of a
+multi-gigabyte image must not decompress the lot. The driver implements the
+optional [`filesystem.Opener`](https://github.com/go-filesystems/interface)
+capability:
+
+```go
+var generic filesystem.Filesystem = fs
+if o, ok := generic.(filesystem.Opener); ok {
+    f, err := o.OpenFile("/usr/lib/big.so")
+    if err != nil { /* ... */ }
+    defer f.Close()
+
+    buf := make([]byte, 4096)
+    n, err := f.ReadAt(buf, 1<<30) // only the blocks that range touches
+    _, _ = n, err
+    _ = f.Size()                   // from the inode; decompresses nothing
+}
+```
+
+Compression does not rule random access out. A SquashFS file is cut into
+fixed-size **logical** blocks (`block_size`, 128 KiB by default) compressed
+**independently**, and the inode carries each one's on-disk length. So the block
+holding byte N is `N/block_size`, and its position on disk is the running sum of
+the preceding lengths — a prefix sum computed once at `OpenFile` over metadata
+already decoded. Serving a range costs the one or two blocks it touches.
+Decompression goes through the same block cache `ReadFile` uses, which matters
+because a fragment block is shared between many files' tails.
+
+`ReadAt` follows `io.ReaderAt` exactly (`n < len(p)` only with a non-nil error,
+`io.EOF` at the end) and is safe to call concurrently.
+
+Note the method `(*FS).OpenFile(path) (filesystem.File, error)` is distinct from
+the package-level `squashfs.OpenFile(path) (*FS, error)`, which opens an image
+from the host filesystem.
 
 ## Limitations
 
