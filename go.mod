@@ -11,5 +11,5 @@ require (
 
 require (
 	github.com/go-volumes/safeio v0.0.0-20260831125406-d8f54b2890d4
-	github.com/pierrec/lz4/v4 v4.1.29
+	github.com/pierrec/lz4/v4 v4.1.30
 )
