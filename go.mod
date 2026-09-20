@@ -6,7 +6,7 @@ require (
 	github.com/anchore/go-lzo v0.1.1
 	github.com/go-filesystems/interface v0.3.0
 	github.com/klauspost/compress v1.20.0
-	github.com/ulikunitz/xz v0.5.16
+	github.com/ulikunitz/xz v0.5.17
 )
 
 require (
