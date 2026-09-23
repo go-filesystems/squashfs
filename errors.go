@@ -9,7 +9,11 @@
 // every mutating method of filesystem.Filesystem returns ErrReadOnly.
 package squashfs
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	iofs "io/fs"
+)
 
 // Sentinel errors returned by the SquashFS driver. Compare with errors.Is so
 // wrapped errors continue to match.
@@ -29,7 +33,7 @@ var (
 	ErrUnsupportedCompression = errors.New("squashfs: unsupported compression")
 
 	// ErrNotFound is returned when a path component cannot be located.
-	ErrNotFound = errors.New("squashfs: path not found")
+	ErrNotFound = fmt.Errorf("squashfs: path not found: %w", iofs.ErrNotExist)
 
 	// ErrNotDirectory is returned when ListDir targets a non-directory.
 	ErrNotDirectory = errors.New("squashfs: not a directory")
