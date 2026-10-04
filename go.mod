@@ -1,6 +1,6 @@
 module github.com/go-filesystems/squashfs
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/anchore/go-lzo v0.1.1
