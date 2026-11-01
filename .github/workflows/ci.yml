@@ -116,6 +116,34 @@ jobs:
           path: squashfs/cover.out
           if-no-files-found: ignore
 
+  # The xz / lzma bomb tests assert a tiny allocation (a planted 1.5 GiB
+  # dictionary claim over a few bytes). They run as a compiled binary under
+  # GOMEMLIMIT and a virtual memory limit, so that a regression fails by itself
+  # instead of allocating gigabytes of the runner.
+  bombs:
+    name: bombs (ulimit -v, GOMEMLIMIT)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout squashfs
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+          check-latest: true
+          cache: true
+
+      - name: Build the test binary
+        env:
+          CGO_ENABLED: "0"
+        run: go test -c -o squashfs.test .
+
+      - name: Run the bomb tests under limits
+        run: |
+          ulimit -v 2097152
+          GOMEMLIMIT=256MiB ./squashfs.test -test.run 'TestBomb(XZ|LZMA)|TestXZ' -test.v
+
   # Emulated runners: cross-compile a static (CGO_ENABLED=0) test binary per
   # package and run it under QEMU for each non-native 64-bit arch.
   #

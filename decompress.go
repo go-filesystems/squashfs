@@ -6,15 +6,16 @@ package squashfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
 	lzo "github.com/anchore/go-lzo"
+	"github.com/go-compressions/xz"
+	"github.com/go-compressions/xz/lzma"
 	"github.com/klauspost/compress/zlib"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
-	"github.com/ulikunitz/xz"
-	"github.com/ulikunitz/xz/lzma"
 )
 
 // decompressor decompresses a single SquashFS block. Implementations are
@@ -67,21 +68,21 @@ func (gzipDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	return out, nil
 }
 
-// xzDecompressor decodes SquashFS "xz" blocks (standard .xz streams / LZMA2,
-// without BCJ filters — mksquashfs's default).
+// xzDecompressor decodes SquashFS "xz" blocks: standard .xz streams (LZMA2,
+// with or without the Delta and BCJ filters).
 type xzDecompressor struct{}
 
 func (xzDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	if err := checkXZ(src); err != nil {
 		return nil, err
 	}
-	r, err := xz.ReaderConfig{SingleStream: true}.NewReader(bytes.NewReader(src))
+	r, err := xz.ReaderConfig{SingleStream: true, MaxDictionary: dictCeiling(maxOut)}.NewReader(bytes.NewReader(src))
 	if err != nil {
-		return nil, fmt.Errorf("squashfs: xz: %w", err)
+		return nil, decodeErr("xz", err, maxOut)
 	}
 	out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
 	if err != nil {
-		return nil, fmt.Errorf("squashfs: xz read: %w", err)
+		return nil, decodeErr("xz read", err, maxOut)
 	}
 	if len(out) > maxOut {
 		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
@@ -89,23 +90,32 @@ func (xzDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	return out, nil
 }
 
-// xzMaxDictSize is the largest LZMA2 dictionary an xz block may declare, 16 MiB.
-// The xz reader allocates the declared dictionary before decoding anything (a
-// 4 GiB claim cost 4 GiB), and raises it to the declared size whatever the
-// caller configures, so the claim has to be read out of the block header
-// first. A block's output is at most 1 MiB, so a dictionary beyond that is
-// dead weight; the xz CLI's presets 0-7 and this package's own writer (8 MiB)
-// sit below the limit, and the reference reader sizes the dictionary from the
-// image's compressor options (linux fs/squashfs/xz_wrapper.c) rather than from
-// the stream.
-const xzMaxDictSize = 16 << 20
+// dictCeiling is the MaxDictionary handed to the xz and lzma readers: the
+// block's output limit, floored at the format's smallest dictionary (and so
+// never zero, which the readers read as their 256 MiB default). A dictionary
+// larger than the output is never read past, and the readers grow their window
+// with the data they produce and refuse (ErrTooLarge) to grow it beyond this
+// figure, so what a block header declares (up to 4 GiB) decides nothing: the
+// memory a block can cost is bounded by maxOut whatever its header says.
+func dictCeiling(maxOut int) int { return max(maxOut, lzma.MinDictCap) }
 
-// checkXZ validates, without allocating, the parts of an .xz stream that
-// decide how much memory the reader will reserve: the stream must be a single
-// stream with at most one block (a squashfs block is compressed by one call),
-// and that block's LZMA2 dictionary must not exceed xzMaxDictSize. Format:
-// the .xz file format specification, sections 2.1 (stream header, footer),
-// 3.1 (block header) and 4 (index).
+// decodeErr wraps an xz or lzma reader error. ErrTooLarge from the readers
+// means the block produced more than the ceiling dictCeiling gave them, that
+// is, more than maxOut bytes: the same refusal, with the same ErrCorrupt, as
+// the output-size check of every other decompressor here.
+func decodeErr(what string, err error, maxOut int) error {
+	if errors.Is(err, xz.ErrTooLarge) {
+		return fmt.Errorf("%w: %s: decompressed block exceeds %d bytes: %w", ErrCorrupt, what, maxOut, err)
+	}
+	return fmt.Errorf("squashfs: %s: %w", what, err)
+}
+
+// checkXZ validates, without allocating, the shape of an .xz stream: a single
+// stream with at most one block (a squashfs block is compressed by one call;
+// anything else is not a squashfs block). It does not look at the dictionary
+// the block header declares: the reader does not allocate it (see
+// dictCeiling). Format: the .xz file format specification, sections 2.1
+// (stream header, footer), 3.1 (block header) and 4 (index).
 func checkXZ(src []byte) error {
 	bad := func(what string) error { return fmt.Errorf("%w: xz: %s", ErrCorrupt, what) }
 	// stream header (12) + footer (12) is the least a stream can be.
@@ -123,48 +133,6 @@ func checkXZ(src []byte) error {
 	if idx[0] != 0 || n <= 0 || records > 1 {
 		return bad("more than one block")
 	}
-	if records == 0 {
-		return nil
-	}
-	// Block header: size byte, flags, optional sizes, then the filter list.
-	hl := (int(src[12]) + 1) * 4
-	if src[12] == 0 || 12+hl > len(src) {
-		return bad("block header")
-	}
-	hdr := src[12 : 12+hl]
-	flags := hdr[1]
-	pos := 2
-	for _, present := range [...]byte{0x40, 0x80} { // compressed / uncompressed size
-		if flags&present != 0 {
-			_, k := binary.Uvarint(hdr[pos:])
-			if k <= 0 {
-				return bad("block header sizes")
-			}
-			pos += k
-		}
-	}
-	for i := 0; i < int(flags&3)+1; i++ {
-		id, k := binary.Uvarint(hdr[pos:])
-		if k <= 0 {
-			return bad("filter id")
-		}
-		pos += k
-		psize, k := binary.Uvarint(hdr[pos:])
-		if k <= 0 || psize > uint64(len(hdr)-pos-k) {
-			return bad("filter properties")
-		}
-		pos += k
-		if id == 0x21 { // LZMA2
-			if psize != 1 {
-				return bad("lzma2 properties")
-			}
-			dict, err := lzma.DecodeDictCap(hdr[pos])
-			if err != nil || dict > xzMaxDictSize {
-				return bad(fmt.Sprintf("lzma2 dictionary %d bytes exceeds %d", dict, xzMaxDictSize))
-			}
-		}
-		pos += int(psize)
-	}
 	return nil
 }
 
@@ -180,29 +148,16 @@ func checkXZ(src []byte) error {
 type lzmaDecompressor struct{}
 
 func (lzmaDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
-	var in io.Reader = bytes.NewReader(src)
-	if len(src) >= lzma.HeaderLen {
-		// The 4-byte dictionary size in the header is attacker-controlled and
-		// the reader allocates a dictionary of that size (up to 2 GiB) before
-		// decoding a byte: 13 header bytes cost 1 GiB. A dictionary larger
-		// than the block's output is never read past, so clamp the header's
-		// value to maxOut (floor: the format's minimum). The decoded bytes
-		// are identical.
-		var hdr [lzma.HeaderLen]byte
-		copy(hdr[:], src)
-		lim := uint32(max(maxOut, lzma.MinDictCap))
-		if binary.LittleEndian.Uint32(hdr[1:5]) > lim {
-			binary.LittleEndian.PutUint32(hdr[1:5], lim)
-		}
-		in = io.MultiReader(bytes.NewReader(hdr[:]), bytes.NewReader(src[lzma.HeaderLen:]))
-	}
-	r, err := lzma.NewReader(in)
+	// The 4-byte dictionary size in the header is attacker-controlled; the
+	// reader does not allocate it, its window follows the data and never
+	// exceeds dictCeiling(maxOut).
+	r, err := lzma.ReaderConfig{MaxDictionary: dictCeiling(maxOut)}.NewReader(bytes.NewReader(src))
 	if err != nil {
-		return nil, fmt.Errorf("squashfs: lzma: %w", err)
+		return nil, decodeErr("lzma", err, maxOut)
 	}
 	out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
 	if err != nil {
-		return nil, fmt.Errorf("squashfs: lzma read: %w", err)
+		return nil, decodeErr("lzma read", err, maxOut)
 	}
 	if len(out) > maxOut {
 		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)

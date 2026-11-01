@@ -33,7 +33,9 @@ func allocated(f func()) uint64 {
 // refused asserts that f ran with a TotalAlloc growth under budget bytes.
 func refused(t *testing.T, what string, budget uint64, f func()) {
 	t.Helper()
-	if n := allocated(f); n >= budget {
+	n := allocated(f)
+	t.Logf("%s: TotalAlloc +%d bytes (budget %d)", what, n, budget)
+	if n >= budget {
 		t.Errorf("%s allocated %d bytes, want < %d", what, n, budget)
 	}
 }
@@ -413,21 +415,43 @@ func TestBombZstdStopsAtBlockSize(t *testing.T) {
 	}
 }
 
-// The lzma_alone header's 4-byte dictionary size is honoured by the reader up
-// to 2 GiB-1: 13 header bytes allocated 1 GiB (measured 1 073 778 264).
+// The lzma_alone header's 4-byte dictionary size was honoured by the
+// ulikunitz/xz reader up to 2 GiB-1: 13 header bytes allocated 1 GiB (measured
+// 1 073 778 264). The decoder is now github.com/go-compressions/xz, whose
+// window follows the data and never exceeds MaxDictionary (the block's output
+// limit here).
 func TestBombLZMADictionaryClamped(t *testing.T) {
 	h := make([]byte, lzma.HeaderLen)
 	h[0] = 0x5D
-	binary.LittleEndian.PutUint32(h[1:], 1<<30)
+	binary.LittleEndian.PutUint32(h[1:], bombDict)
 	binary.LittleEndian.PutUint64(h[5:], 1<<40)
-	refused(t, "13-byte lzma header, 1 GiB dictionary", 1<<20, func() {
+	refused(t, "13-byte lzma header, 1.5 GiB dictionary", 1<<20, func() {
 		if _, err := (lzmaDecompressor{}).decompress(h, 131072); err == nil {
 			t.Error("garbage lzma body accepted")
 		}
 	})
 
+	// The same header over a real, tiny body: it decodes (the declared
+	// dictionary is only a claim) or is refused, but never allocates it.
+	bomb := plantLZMABomb(t, []byte("hello"), bombDict)
+	refused(t, "1.5 GiB-dictionary lzma stream over 5 bytes", 1<<20, func() {
+		out, err := lzmaDecompressor{}.decompress(bomb, 131072)
+		if err != nil || string(out) != "hello" {
+			t.Errorf("planted lzma bomb: %q, %v", out, err)
+		}
+	})
+
+	// A stream that produces more than the ceiling is refused as ErrCorrupt
+	// (the readers' ErrTooLarge is mapped), and cheaply.
+	big := plantLZMABomb(t, make([]byte, 1<<20), bombDict)
+	refused(t, "1 MiB of zeros under a 4 KiB limit", 1<<20, func() {
+		if _, err := (lzmaDecompressor{}).decompress(big, 4096); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("err = %v, want ErrCorrupt", err)
+		}
+	})
+
 	// A real stream whose header declares a dictionary far above the block's
-	// output still decodes: the clamp changes the allocation, not the bytes.
+	// output still decodes: the declaration changes nothing about the bytes.
 	want := bytes.Repeat([]byte("squashfs-lzma-"), 3000)
 	var buf bytes.Buffer
 	w, err := lzma.WriterConfig{Size: int64(len(want)), DictCap: 64 * miB}.NewWriter(&buf)
@@ -474,37 +498,71 @@ func makeXZ(t *testing.T, payload []byte, blockSize int64, prop byte) []byte {
 	return s
 }
 
-// The xz reader allocates the block header's declared LZMA2 dictionary and
-// raises its own limit to it: a stream declaring 4 GiB allocated 4 295 013 784
-// bytes to decode the five bytes "hello".
+// bombDict is 1.5 GiB, the dictionary the planted bombs declare; bombProp is its
+// LZMA2 dictionary property byte ((2|p&1) << (p/2+11) = 3 << 29).
+const (
+	bombDict = 3 << 29
+	bombProp = 37
+)
+
+// plantLZMABomb returns a .lzma stream of payload whose header declares dict
+// bytes of dictionary, however little the data needs.
+func plantLZMABomb(t *testing.T, payload []byte, dict uint32) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	w, err := lzma.WriterConfig{Size: int64(len(payload)), DictCap: 1 << 16}.NewWriter(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write(payload)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := b.Bytes()
+	binary.LittleEndian.PutUint32(s[1:], dict)
+	return s
+}
+
+// The ulikunitz/xz reader allocated the block header's declared LZMA2
+// dictionary whole and raised its own limit to it: a 44-byte stream declaring
+// 1.5 GiB allocated 1 610 663 976 bytes (4 GiB: 4 295 013 784) to decode the
+// five bytes "hello". The decoder is now github.com/go-compressions/xz, whose
+// window follows the data and never exceeds MaxDictionary, the block's output
+// limit: the declaration decides nothing.
 func TestBombXZDictionary(t *testing.T) {
 	payload := []byte("hello")
-	refused(t, "4 GiB dictionary claim", 1<<20, func() {
-		if _, err := (xzDecompressor{}).decompress(makeXZ(t, payload, 0, 40), 131072); !errors.Is(err, ErrCorrupt) {
+	for _, prop := range []byte{bombProp, 40} { // 1.5 GiB, 4 GiB-1
+		bomb := makeXZ(t, payload, 0, prop)
+		if len(bomb) > 64 {
+			t.Fatalf("planted bomb is %d bytes", len(bomb))
+		}
+		refused(t, "xz block declaring a huge dictionary", 1<<20, func() {
+			out, err := (xzDecompressor{}).decompress(bomb, 131072)
+			if err != nil || string(out) != "hello" {
+				t.Errorf("prop %d: %q, %v", prop, out, err)
+			}
+		})
+	}
+
+	// Output past the ceiling is refused as ErrCorrupt (the reader's ErrTooLarge
+	// is mapped), also cheaply, whatever the header declares.
+	big := makeXZ(t, make([]byte, 1<<20), 0, bombProp)
+	refused(t, "1 MiB of zeros under a 4 KiB limit", 1<<20, func() {
+		if _, err := (xzDecompressor{}).decompress(big, 4096); !errors.Is(err, ErrCorrupt) {
 			t.Errorf("err = %v, want ErrCorrupt", err)
 		}
 	})
-
-	var atLimit byte
-	for p := byte(0); p <= 40; p++ {
-		if d, _ := lzma.DecodeDictCap(p); d == xzMaxDictSize {
-			atLimit = p
-		}
+	// Exactness: the ceiling is the output limit, no more and no less.
+	if out, err := (xzDecompressor{}).decompress(big, 1<<20); err != nil || len(out) != 1<<20 {
+		t.Errorf("1 MiB under a 1 MiB limit: len %d, err %v", len(out), err)
 	}
-	if atLimit == 0 {
-		t.Fatal("no dictionary property encodes xzMaxDictSize")
-	}
-	if out, err := (xzDecompressor{}).decompress(makeXZ(t, payload, 0, atLimit), 131072); err != nil || string(out) != "hello" {
-		t.Errorf("dictionary exactly at the limit: %q, %v", out, err)
-	}
-	if _, err := (xzDecompressor{}).decompress(makeXZ(t, payload, 0, atLimit+1), 131072); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("dictionary one step over the limit: err = %v, want ErrCorrupt", err)
+	if _, err := (xzDecompressor{}).decompress(big, 1<<20-1); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("1 MiB under a 1 MiB - 1 limit: err = %v, want ErrCorrupt", err)
 	}
 }
 
-// Only the first block's header is inspected, so streams carrying more than one
-// block or more than one stream are refused (a squashfs block is one block of
-// one stream; each further header could declare its own dictionary).
+// Streams carrying more than one block or more than one stream are refused (a
+// squashfs block is one block of one stream).
 func TestXZSingleBlockSingleStream(t *testing.T) {
 	multi := makeXZ(t, bytes.Repeat([]byte("0123456789"), 400), 1024, 0)
 	if _, err := (xzDecompressor{}).decompress(multi, 131072); !errors.Is(err, ErrCorrupt) {
@@ -529,7 +587,7 @@ func TestXZSingleBlockSingleStream(t *testing.T) {
 
 // FuzzDecompress feeds every decompressor arbitrary bytes under a 4 KiB output
 // limit. Properties: no panic, the output never exceeds the limit, and no
-// call allocates more than 64 MiB (the xz dictionary ceiling is 16 MiB).
+// call allocates more than 64 MiB.
 func FuzzDecompress(f *testing.F) {
 	enc, _ := zstd.NewWriter(nil)
 	// The first argument selects a compression id as id%6+1.
