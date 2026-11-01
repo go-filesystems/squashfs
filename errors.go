@@ -48,6 +48,13 @@ var (
 	// limit, indicating a loop.
 	ErrTooManyLinks = errors.New("squashfs: too many symbolic link traversals")
 
+	// ErrTooLarge is returned when a structure the image declares (a file's
+	// contents for ReadFile, a directory listing, an attribute list) would
+	// exceed a configured or built-in ceiling. It is returned before the
+	// memory is allocated. Use OpenFile / ReadAt to stream a large file, or
+	// ReadFileLimit to choose the ceiling.
+	ErrTooLarge = errors.New("squashfs: declared size exceeds the limit")
+
 	// ErrCorrupt is returned when an on-disk structure fails a sanity check.
 	ErrCorrupt = errors.New("squashfs: corrupt image")
 )

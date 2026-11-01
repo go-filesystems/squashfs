@@ -22,6 +22,13 @@ const (
 	compZSTD = 6
 )
 
+// Format limits on the data block size (SQUASHFS_FILE_MAX_SIZE and
+// SQUASHFS_FILE_MAX_LOG in linux fs/squashfs/squashfs_fs.h).
+const (
+	maxBlockSize = 1 << 20
+	maxBlockLog  = 20
+)
+
 // superblockSize is the on-disk size of the SquashFS 4.0 superblock.
 const superblockSize = 96
 
@@ -87,8 +94,16 @@ func readSuperblock(rs io.ReaderAt) (*Superblock, error) {
 	if sb.VersionMajor != 4 || sb.VersionMinor != 0 {
 		return nil, fmt.Errorf("%w: %d.%d", ErrUnsupportedVersion, sb.VersionMajor, sb.VersionMinor)
 	}
-	if sb.BlockSize == 0 || sb.BlockSize != 1<<sb.BlockLog {
-		return nil, fmt.Errorf("%w: block_size %d != 1<<%d", ErrCorrupt, sb.BlockSize, sb.BlockLog)
+	// The reference reader refuses block_size > SQUASHFS_FILE_MAX_SIZE (1 MiB)
+	// and block_log > SQUASHFS_FILE_MAX_LOG (20), and requires them to agree
+	// (linux fs/squashfs/super.c, squashfs_fill_super). Checking block_log
+	// first also keeps the shift below it well defined. Every decompression
+	// buffer and every cache slot is sized from block_size, so without this
+	// bound a 96-byte superblock could ask for 2 GiB per block.
+	if sb.BlockLog > maxBlockLog || sb.BlockSize > maxBlockSize ||
+		sb.BlockSize == 0 || sb.BlockSize != 1<<sb.BlockLog {
+		return nil, fmt.Errorf("%w: block_size %d, block_log %d (max %d)",
+			ErrCorrupt, sb.BlockSize, sb.BlockLog, maxBlockSize)
 	}
 	return sb, nil
 }

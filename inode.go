@@ -214,13 +214,23 @@ func (in *inode) readBlockList(c *metaCursor, blockSize uint32) error {
 	if n < 0 || n > 1<<24 {
 		return fmt.Errorf("%w: implausible block count %d", ErrCorrupt, n)
 	}
-	in.blockSizes = make([]uint32, n)
-	for i := 0; i < n; i++ {
-		b, err := c.readN(4)
-		if err != nil {
+	// n comes from the declared file size, so it is a claim, not a fact: up to
+	// 2^24 entries (64 MiB) before a single metadata byte has been read. Grow
+	// the list as the entries actually arrive, in chunks, so a lie costs what
+	// the metadata can back (and a truthful file costs one chunk read per 1024
+	// blocks instead of one allocation per block).
+	const chunk = 1024
+	in.blockSizes = make([]uint32, 0, min(n, chunk))
+	var buf [4 * chunk]byte
+	for len(in.blockSizes) < n {
+		k := min(n-len(in.blockSizes), chunk)
+		if err := c.read(buf[:4*k]); err != nil {
+			in.blockSizes = nil
 			return err
 		}
-		in.blockSizes[i] = binary.LittleEndian.Uint32(b)
+		for j := 0; j < k; j++ {
+			in.blockSizes = append(in.blockSizes, binary.LittleEndian.Uint32(buf[4*j:]))
+		}
 	}
 	return nil
 }

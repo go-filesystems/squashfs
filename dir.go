@@ -16,6 +16,13 @@ type dirEntry struct {
 	Type     uint16 // SquashFS inode type stored in the entry
 }
 
+// maxDirEntries caps the entries one directory may list, 4 Mi (about 200 MiB of
+// parsed entries). A directory's size is a u32, and its metadata is compressed,
+// so a few kilobytes of image can list millions of entries (each costs 9 or
+// more bytes of metadata, and the parsed form is several times larger).
+// Variable so tests can lower it.
+var maxDirEntries = 1 << 22
+
 // readDir parses the directory listing of dir into entries. SquashFS stores a
 // directory as a run of headers, each introducing up to 256 entries that share
 // a common inode-table metadata block and a base inode number.
@@ -29,7 +36,10 @@ func readDir(fs *FS, dir *inode) ([]dirEntry, error) {
 		return nil, err
 	}
 	le := binary.LittleEndian
-	remaining := int(dir.Size)
+	// int64, not int: a directory's size is a u32 on disk, and on a 32-bit
+	// target int(4 GiB-ish) is negative, which silently listed a big directory
+	// as empty.
+	remaining := int64(dir.Size)
 	var out []dirEntry
 	for remaining >= 12 {
 		hdr, err := c.readN(12)
@@ -53,14 +63,17 @@ func readDir(fs *FS, dir *inode) ([]dirEntry, error) {
 			inodeDelta := int64(int16(le.Uint16(eh[2:])))
 			etype := le.Uint16(eh[4:])
 			nameLen := int(le.Uint16(eh[6:])) + 1 // stored value is "len - 1"
-			if nameLen > remaining || nameLen > 256 {
+			if int64(nameLen) > remaining || nameLen > 256 {
 				return nil, fmt.Errorf("%w: dir entry name length %d", ErrCorrupt, nameLen)
 			}
 			nameB, err := c.readN(nameLen)
 			if err != nil {
 				return nil, err
 			}
-			remaining -= nameLen
+			remaining -= int64(nameLen)
+			if len(out) >= maxDirEntries {
+				return nil, fmt.Errorf("%w: directory lists more than %d entries", ErrTooLarge, maxDirEntries)
+			}
 			out = append(out, dirEntry{
 				Name:     string(nameB),
 				InodeRef: startBlock<<16 | offset,
