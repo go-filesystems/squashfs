@@ -23,7 +23,7 @@ parses an image produced by `mksquashfs` and exposes it through the shared
 | ListDir | ✅ | Multi-header directories (no `.`/`..` — SquashFS omits them) |
 | Stat | ✅ | mode (type + perms), size, inode number |
 | ReadLink / Symlinks | ✅ | Targets read; followed during path resolution |
-| Compression — gzip / xz / zstd / lzo / lz4 | ✅ | gzip (zlib), xz (LZMA2, no BCJ), zstd, LZO1X, LZ4 |
+| Compression — gzip / xz / zstd / lzo / lz4 | ✅ | gzip (zlib), xz (LZMA2, Delta and BCJ filters), zstd, LZO1X, LZ4 |
 | Compression — lzma (legacy) | ✅ | Standalone LZMA1 stream decoded |
 | Create image (`BuildFromDir`) | ✅ | Build a SquashFS 4.0 image from a tree; gzip or uncompressed; `unsquashfs`-readable |
 | In-place writes (`WriteFile`/`MkDir`/…) | ❌ | The archive is immutable once written; mutators return `ErrReadOnly` |
@@ -108,8 +108,8 @@ input-driven allocation is therefore bounded **before** it is made
 | a directory | at most 4 Mi entries (`ErrTooLarge`) |
 | an xattr list | the id index is read one pointer at a time; names and values are capped at 16 MiB per inode |
 | zstd output | the shared decoder stops at 1 MiB (the format maximum), not 64 GiB |
-| lzma dictionary | the header's dictionary is clamped to the block's output size |
-| xz dictionary | at most 16 MiB, one block, one stream (checked in the block header and index before the reader allocates) |
+| lzma dictionary | the dictionary the header declares (up to 4 GiB) is never allocated: the decoder ([`go-compressions/xz`](https://github.com/go-compressions/xz)) grows its window with the data it produces and refuses to grow it beyond `MaxDictionary`, set to the block's output limit; a block that outgrows it is `ErrCorrupt` |
+| xz dictionary | the same: the block header's dictionary is a claim, not an allocation, and `MaxDictionary` is the block's output limit (a planted 1.5 GiB claim over a 44-byte stream costs about 23 KB; it cost 1.6 GB with `ulikunitz/xz`). The stream must also be one block of one stream |
 
 Fuzz targets: `FuzzOpenRead`, `FuzzReadFile`, `FuzzReadMetaBlock`,
 `FuzzReadDir`, `FuzzDecompress`, `FuzzReadInode`, `FuzzReadXattr`.
@@ -117,7 +117,7 @@ Fuzz targets: `FuzzOpenRead`, `FuzzReadFile`, `FuzzReadMetaBlock`,
 ## Limitations
 
 - Reading: gzip, xz, zstd, LZO, lz4 and legacy standalone lzma blocks are all
-  decoded. xz with BCJ filters is unsupported.
+  decoded; xz blocks may carry the Delta and BCJ filters.
 - Writing (`BuildFromDir`): produces gzip or uncompressed images; files are
   stored as full data blocks (no tail-end fragment packing yet), all owned by
   uid/gid 0, no xattrs. Once written, an image is immutable (no in-place edits).
