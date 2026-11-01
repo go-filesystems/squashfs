@@ -88,7 +88,19 @@ func (fs *FS) Close() error {
 
 // ReadFile returns the full contents of the regular file at path. Symlinks,
 // including a final-component symlink, are followed.
+//
+// A file larger than DefaultMaxReadFile (1 GiB) is refused with ErrTooLarge
+// before any memory is allocated: the image declares the size, and a few
+// kilobytes of sparse block list can declare terabytes. Use ReadFileLimit to
+// choose the ceiling, or OpenFile to stream.
 func (fs *FS) ReadFile(path string) ([]byte, error) {
+	return fs.ReadFileLimit(path, DefaultMaxReadFile)
+}
+
+// ReadFileLimit is ReadFile with a caller-chosen ceiling on the file's size, in
+// bytes; a file the inode declares larger returns ErrTooLarge without
+// allocating. A negative max disables the ceiling.
+func (fs *FS) ReadFileLimit(path string, max int64) ([]byte, error) {
 	in, err := resolve(fs, path, true)
 	if err != nil {
 		return nil, err
@@ -96,7 +108,7 @@ func (fs *FS) ReadFile(path string) ([]byte, error) {
 	if !in.isRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrNotRegular, path)
 	}
-	return readFile(fs, in)
+	return readFileLimit(fs, in, max)
 }
 
 // ListDir enumerates the entries of the directory at path. SquashFS does not

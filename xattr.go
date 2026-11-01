@@ -26,6 +26,11 @@ var xattrPrefixes = map[uint16]string{
 // kv region start).
 const xattrFlagOOL = 0x0100
 
+// maxXattrBytes caps the names and values one inode's attribute list may
+// return, 16 MiB; Linux itself limits a value to 64 KiB (XATTR_SIZE_MAX) and a
+// list to 64 KiB (XATTR_LIST_MAX). It is a variable so tests can lower it.
+var maxXattrBytes = 16 << 20
+
 // xattrIDEntry locates one inode's attribute list within the key/value region.
 type xattrIDEntry struct {
 	ref   uint64 // reference (block<<16 | offset) into the kv region
@@ -39,9 +44,9 @@ const xattrIDPerMetaBlock = metaBlockMax / xattrIDEntrySize
 // xattrTable is the parsed xattr id table header plus the absolute file offset
 // of the key/value metadata region.
 type xattrTable struct {
-	kvStart  int64   // absolute file offset of the first kv metadata block
-	idCount  uint32  // number of xattr id entries
-	idBlocks []int64 // absolute file offsets of the id-table metadata blocks
+	kvStart int64  // absolute file offset of the first kv metadata block
+	idCount uint32 // number of xattr id entries
+	nBlocks uint64 // id-table metadata blocks; their u64 offsets follow the header
 }
 
 // hasXattrTable reports whether the image carries an xattr table. An absent
@@ -68,18 +73,20 @@ func (fs *FS) readXattrTable() (*xattrTable, error) {
 		kvStart: int64(le.Uint64(hdr[0:])),
 		idCount: le.Uint32(hdr[8:]),
 	}
-	nBlocks := int((t.idCount + xattrIDPerMetaBlock - 1) / xattrIDPerMetaBlock)
-	if t.idCount > 0 && nBlocks == 0 {
-		nBlocks = 1
+	// idCount is a claim: up to 2^32 entries, i.e. an 8-million-pointer index
+	// (64 MiB, twice, once as bytes and once as int64s) that this function used
+	// to read whole before any lookup needed it. The pointers are read one at a
+	// time, on demand (readXattrIDEntry). The reference reader requires the
+	// index to end exactly at bytes_used (linux fs/squashfs/xattr_id.c); the
+	// same check, when the sizes are known, rejects the lie up front.
+	nBlocks := (uint64(t.idCount) + xattrIDPerMetaBlock - 1) / xattrIDPerMetaBlock
+	if fs.size > 0 {
+		end := uint64(fs.sb.XattrTableStart) + 16 + nBlocks*8
+		if uint64(fs.sb.XattrTableStart) > uint64(fs.size) || end > uint64(fs.size) {
+			return nil, fmt.Errorf("%w: xattr id index of %d blocks runs past the image", ErrCorrupt, nBlocks)
+		}
 	}
-	ptrs := make([]byte, nBlocks*8)
-	if _, err := fs.rs.ReadAt(ptrs, int64(fs.sb.XattrTableStart)+16); err != nil {
-		return nil, fmt.Errorf("squashfs: read xattr id index: %w", err)
-	}
-	t.idBlocks = make([]int64, nBlocks)
-	for i := 0; i < nBlocks; i++ {
-		t.idBlocks[i] = int64(le.Uint64(ptrs[i*8:]))
-	}
+	t.nBlocks = nBlocks
 	return t, nil
 }
 
@@ -89,12 +96,16 @@ func (fs *FS) readXattrIDEntry(t *xattrTable, idx uint32) (xattrIDEntry, error) 
 	if idx >= t.idCount {
 		return xattrIDEntry{}, fmt.Errorf("%w: xattr id %d >= %d", ErrCorrupt, idx, t.idCount)
 	}
-	blockIdx := int(idx) / xattrIDPerMetaBlock
-	inBlock := int(idx) % xattrIDPerMetaBlock
-	if blockIdx >= len(t.idBlocks) {
+	blockIdx := uint64(idx) / xattrIDPerMetaBlock
+	inBlock := int(idx % xattrIDPerMetaBlock)
+	if blockIdx >= t.nBlocks {
 		return xattrIDEntry{}, fmt.Errorf("%w: xattr id block %d past index", ErrCorrupt, blockIdx)
 	}
-	block, _, err := fs.readMetaBlockCached(t.idBlocks[blockIdx])
+	var ptr [8]byte
+	if _, err := fs.rs.ReadAt(ptr[:], int64(fs.sb.XattrTableStart)+16+int64(blockIdx)*8); err != nil {
+		return xattrIDEntry{}, fmt.Errorf("squashfs: read xattr id index: %w", err)
+	}
+	block, _, err := fs.readMetaBlockCached(int64(binary.LittleEndian.Uint64(ptr[:])))
 	if err != nil {
 		return xattrIDEntry{}, err
 	}
@@ -120,8 +131,20 @@ func (fs *FS) readXattrPairs(t *xattrTable, e xattrIDEntry) (map[string][]byte, 
 		return nil, err
 	}
 	le := binary.LittleEndian
-	out := make(map[string][]byte, e.count)
+	// e.count is a claim (up to 2^32): sizing the map from it reserved 6.4 GB
+	// for a count of 2^26 and aborts the process outright for larger ones.
+	// Let the map grow with the pairs that really arrive.
+	out := make(map[string][]byte, min(e.count, 64))
+	budget := maxXattrBytes // names + values + a per-pair overhead, see below
 	for i := uint32(0); i < e.count; i++ {
+		// Out-of-line values may all point at one stored value, so a few bytes
+		// of list can yield a copy of up to 8 KiB each: the list's output is
+		// not bounded by its size. Charge every pair its name, its value and a
+		// fixed 8 bytes (the smallest a pair can occupy on disk), so the loop
+		// also ends for a count of 2^32 empty pairs.
+		if budget -= 8; budget < 0 {
+			return nil, fmt.Errorf("%w: xattr list exceeds %d bytes", ErrTooLarge, maxXattrBytes)
+		}
 		keyHdr, err := c.readN(4) // type(u16), name_size(u16)
 		if err != nil {
 			return nil, err
@@ -160,6 +183,9 @@ func (fs *FS) readXattrPairs(t *xattrTable, e xattrIDEntry) (map[string][]byte, 
 			if err != nil {
 				return nil, err
 			}
+			if budget -= len(name) + len(val); budget < 0 {
+				return nil, fmt.Errorf("%w: xattr list exceeds %d bytes", ErrTooLarge, maxXattrBytes)
+			}
 			out[name] = val
 			continue
 		}
@@ -169,6 +195,9 @@ func (fs *FS) readXattrPairs(t *xattrTable, e xattrIDEntry) (map[string][]byte, 
 		val, err := c.readN(int(vsize))
 		if err != nil {
 			return nil, err
+		}
+		if budget -= len(name) + len(val); budget < 0 {
+			return nil, fmt.Errorf("%w: xattr list exceeds %d bytes", ErrTooLarge, maxXattrBytes)
 		}
 		out[name] = val
 	}

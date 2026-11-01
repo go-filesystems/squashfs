@@ -91,6 +91,29 @@ Note the method `(*FS).OpenFile(path) (filesystem.File, error)` is distinct from
 the package-level `squashfs.OpenFile(path) (*FS, error)`, which opens an image
 from the host filesystem.
 
+## Untrusted images
+
+An image is attacker-controlled input, and in SquashFS almost every size is a
+claim: a 4-byte sparse block entry stands for a whole block of zeros, metadata
+is compressed, and a fragment of a header can name gigabytes. Every
+input-driven allocation is therefore bounded **before** it is made
+(`bombs_test.go` measures each road with `runtime.MemStats`):
+
+| Claim in the image | Bound |
+|---|---|
+| `block_size` / `block_log` | at most 1 MiB / 20, the reference limits (Linux `super.c`) |
+| a data block's on-disk length | at most `block_size`, compressed or stored, and inside the image (Linux `block.c`) |
+| a file's size | `ReadFile` refuses more than `DefaultMaxReadFile` (1 GiB) with `ErrTooLarge`; `ReadFileLimit(path, max)` picks the ceiling, `OpenFile` + `ReadAt` stream any size |
+| a file's block list | read in chunks as the metadata supplies it, never sized from the claim |
+| a directory | at most 4 Mi entries (`ErrTooLarge`) |
+| an xattr list | the id index is read one pointer at a time; names and values are capped at 16 MiB per inode |
+| zstd output | the shared decoder stops at 1 MiB (the format maximum), not 64 GiB |
+| lzma dictionary | the header's dictionary is clamped to the block's output size |
+| xz dictionary | at most 16 MiB, one block, one stream (checked in the block header and index before the reader allocates) |
+
+Fuzz targets: `FuzzOpenRead`, `FuzzReadFile`, `FuzzReadMetaBlock`,
+`FuzzReadDir`, `FuzzDecompress`, `FuzzReadInode`, `FuzzReadXattr`.
+
 ## Limitations
 
 - Reading: gzip, xz, zstd, LZO, lz4 and legacy standalone lzma blocks are all

@@ -76,8 +76,16 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	if n == 0 {
 		return nil, nil // sparse: caller zero-fills
 	}
-	if n > int64(fs.sb.BlockSize) && !compressed {
+	// The reference reader refuses any on-disk length above block_size, stored
+	// or compressed (linux fs/squashfs/block.c: "length > output->length"),
+	// and one that runs past bytes_used. A 24-bit length field can name 16 MiB;
+	// checking before the make() below is what keeps three header bytes from
+	// costing a 16 MiB buffer.
+	if n > int64(fs.sb.BlockSize) {
 		return nil, fmt.Errorf("%w: data block %d > block size %d", ErrCorrupt, n, fs.sb.BlockSize)
+	}
+	if err := fs.checkExtent(off, n); err != nil {
+		return nil, err
 	}
 	if compressed {
 		if b, ok := fs.cache.getData(off); ok {
@@ -99,8 +107,33 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	return out, nil
 }
 
-// readFile assembles the full contents of regular-file inode in.
+// checkExtent reports ErrCorrupt when the n bytes at off do not lie inside the
+// image. It is a no-op when the image size is unknown (Open with size <= 0);
+// the read itself then reports the short read. It does no I/O, which is what
+// lets callers run it over a whole block list before allocating anything.
+func (fs *FS) checkExtent(off, n int64) error {
+	if fs.size > 0 && (off < 0 || off > fs.size-n) {
+		return fmt.Errorf("%w: extent [%d,+%d) outside the %d-byte image", ErrCorrupt, off, n, fs.size)
+	}
+	return nil
+}
+
+// DefaultMaxReadFile is the largest file ReadFile will assemble in memory,
+// 1 GiB. A SquashFS file can legitimately expand a very long way (a sparse
+// block costs 4 bytes of block list, and the block list itself is compressed),
+// so no structural bound relates the image's size to the file's; a ceiling is
+// the only protection. Larger files stream through OpenFile and ReadAt, or
+// raise the ceiling with ReadFileLimit.
+const DefaultMaxReadFile int64 = 1 << 30
+
+// readFile assembles the full contents of regular-file inode in, up to
+// DefaultMaxReadFile bytes.
 func readFile(fs *FS, in *inode) ([]byte, error) {
+	return readFileLimit(fs, in, DefaultMaxReadFile)
+}
+
+// readFileLimit is readFile with an explicit ceiling; max < 0 means none.
+func readFileLimit(fs *FS, in *inode, max int64) ([]byte, error) {
 	blockSize := uint64(fs.sb.BlockSize)
 	off := int64(in.blocksStart)
 	remaining := in.Size
@@ -120,6 +153,27 @@ func readFile(fs *FS, in *inode) ([]byte, error) {
 	if in.Size > maxBytes {
 		return nil, fmt.Errorf("%w: file size %d exceeds %d reachable bytes",
 			ErrCorrupt, in.Size, maxBytes)
+	}
+	if max >= 0 && in.Size > uint64(max) {
+		return nil, fmt.Errorf("%w: file of %d bytes, limit %d", ErrTooLarge, in.Size, max)
+	}
+	// Every stored block must lie inside the image: check that before the
+	// make() below, so a block list pointing nowhere costs no allocation.
+	// (Compression and sparse blocks still legitimately expand; the ceiling
+	// above bounds that.)
+	cur := off
+	for _, sz := range in.blockSizes {
+		n, _ := blockOnDiskSize(sz)
+		if n == 0 {
+			continue
+		}
+		if n > int64(blockSize) {
+			return nil, fmt.Errorf("%w: data block %d > block size %d", ErrCorrupt, n, blockSize)
+		}
+		if err := fs.checkExtent(cur, n); err != nil {
+			return nil, err
+		}
+		cur += n
 	}
 	hint, err := safeio.MakeBytes(int64(in.Size), int64(maxBytes))
 	if err != nil {
