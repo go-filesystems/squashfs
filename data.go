@@ -72,6 +72,18 @@ func blockOnDiskSize(sz uint32) (n int64, compressed bool) {
 // copy out of) the returned slice, so handing back the cache-owned slice is
 // safe for the read-only image.
 func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
+	return fs.readBlockOpt(off, sizeWord, false)
+}
+
+// readBlockOpt is readBlock; cacheRaw also caches a block stored UNCOMPRESSED.
+// A fragment block is shared by every small file packed into it, and mksquashfs
+// stores it raw when compression does not shrink it (random or already-packed
+// data): without this each such file re-read the whole block from the device
+// (a metadata walk of 4000 small files was 1.4x slower than the kernel, #49).
+// The cache is the same bounded one (defaultDataCacheBlocks blocks of at most
+// block_size bytes), and data blocks of large files are not cached, so a
+// sequential read does not churn it.
+func (fs *FS) readBlockOpt(off int64, sizeWord uint32, cacheRaw bool) ([]byte, error) {
 	n, compressed := blockOnDiskSize(sizeWord)
 	if n == 0 {
 		return nil, nil // sparse: caller zero-fills
@@ -87,7 +99,7 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 	if err := fs.checkExtent(off, n); err != nil {
 		return nil, err
 	}
-	if compressed {
+	if compressed || cacheRaw {
 		if b, ok := fs.cache.getData(off); ok {
 			return b, nil
 		}
@@ -97,6 +109,9 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 		return nil, fmt.Errorf("squashfs: read data block @%d: %w", off, err)
 	}
 	if !compressed {
+		if cacheRaw {
+			fs.cache.putData(off, raw)
+		}
 		return raw, nil
 	}
 	out, err := fs.d.decompress(raw, int(fs.sb.BlockSize))
@@ -241,6 +256,9 @@ func (fs *FS) readFragmentEntry(idx uint32) (fragmentEntry, error) {
 	if uint32(idx) >= fs.sb.FragCount {
 		return fragmentEntry{}, fmt.Errorf("%w: fragment index %d >= %d", ErrCorrupt, idx, fs.sb.FragCount)
 	}
+	if e, ok := fs.cache.getFrag(idx); ok {
+		return e, nil
+	}
 	blockIdx := int(idx) / fragPerMetaBlock
 	inBlock := int(idx) % fragPerMetaBlock
 
@@ -258,10 +276,12 @@ func (fs *FS) readFragmentEntry(idx uint32) (fragmentEntry, error) {
 		return fragmentEntry{}, fmt.Errorf("%w: fragment entry %d past block", ErrCorrupt, idx)
 	}
 	le := binary.LittleEndian
-	return fragmentEntry{
+	e := fragmentEntry{
 		start:    le.Uint64(block[o:]),
 		sizeWord: le.Uint32(block[o+8:]),
-	}, nil
+	}
+	fs.cache.putFrag(idx, e)
+	return e, nil
 }
 
 // readFragment returns the decompressed fragment data block for index idx.
@@ -270,5 +290,5 @@ func (fs *FS) readFragment(idx uint32) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fs.readBlock(int64(fe.start), fe.sizeWord)
+	return fs.readBlockOpt(int64(fe.start), fe.sizeWord, true)
 }

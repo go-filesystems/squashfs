@@ -1,6 +1,9 @@
 package squashfs
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,4 +100,58 @@ func TestStatDoesNotFollowTheFinalSymlink(t *testing.T) {
 		t.Errorf("ReadLink: %q, %v", target, err)
 	}
 	var _ filesystem.TimesReader = fs
+}
+
+type countingReaderAt struct {
+	r io.ReaderAt
+	n int
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	c.n++
+	return c.r.ReadAt(p, off)
+}
+
+// Small files share a fragment block; when that block is stored uncompressed
+// (incompressible data, or an uncompressed image) it used to be read from the
+// device again for every file (#49).
+func TestFragmentBlockStoredRawIsReadOnce(t *testing.T) {
+	src := t.TempDir()
+	const files = 60
+	for i := 0; i < files; i++ {
+		if err := os.WriteFile(filepath.Join(src, fmt.Sprintf("f%03d", i)), bytes.Repeat([]byte{byte(i + 1)}, 100+i), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	img := filepath.Join(t.TempDir(), "a.sqsh")
+	if err := BuildFromDir(img, src, BuildOptions{Uncompressed: true}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := &countingReaderAt{r: bytes.NewReader(raw)}
+	fs, err := Open(cr, int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.Superblock().FragCount == 0 {
+		t.Fatal("the files were not packed into a fragment")
+	}
+	for i := 0; i < files; i++ { // warm the metadata cache and the fragment
+		if _, err := fs.ReadFile(fmt.Sprintf("/f%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := cr.n
+	for i := 0; i < files; i++ {
+		got, err := fs.ReadFile(fmt.Sprintf("/f%03d", i))
+		if err != nil || !bytes.Equal(got, bytes.Repeat([]byte{byte(i + 1)}, 100+i)) {
+			t.Fatalf("f%03d: %v", i, err)
+		}
+	}
+	if reads := cr.n - before; reads != 0 {
+		t.Errorf("re-reading %d small files cost %d device reads: the raw fragment block is not cached", files, reads)
+	}
 }
