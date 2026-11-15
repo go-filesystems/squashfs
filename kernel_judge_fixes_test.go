@@ -152,6 +152,55 @@ func TestFragmentBlockStoredRawIsReadOnce(t *testing.T) {
 		}
 	}
 	if reads := cr.n - before; reads != 0 {
-		t.Errorf("re-reading %d small files cost %d device reads: the raw fragment block is not cached", files, reads)
+		t.Errorf("re-reading %d small files cost %d device reads: the raw fragment block or the fragment-table entry (the 8-byte pointer) is not cached", files, reads)
+	}
+}
+
+// A crafted image can name one offset as a compressed block (through one inode)
+// and as a raw block (through another, or a fragment entry). The data cache was
+// keyed by offset alone and served the bytes of whichever was read first.
+func TestDataCacheDistinguishesHowABlockIsRead(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f"), bytes.Repeat([]byte("a"), 140000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(t.TempDir(), "a.sqsh")
+	if err := BuildFromDir(img, src, BuildOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := OpenFile(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close()
+	in, err := resolve(fs, "/f", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var off int64 = int64(in.blocksStart)
+	var word uint32
+	for _, sz := range in.blockSizes {
+		if n, compressed := blockOnDiskSize(sz); n > 0 && compressed {
+			word = sz
+			break
+		}
+		n, _ := blockOnDiskSize(sz)
+		off += n
+	}
+	if word == 0 {
+		t.Skip("no compressed block in this image")
+	}
+	n, _ := blockOnDiskSize(word)
+	plain, err := fs.readBlockOpt(off, word, true)
+	if err != nil || int64(len(plain)) == n {
+		t.Fatalf("the compressed block did not expand: %d bytes (on disk %d), %v", len(plain), n, err)
+	}
+	// The same offset and length, read as a RAW block.
+	forged, err := fs.readBlockOpt(off, uint32(n)|dataUncompressedBit, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(forged)) != n {
+		t.Fatalf("a raw read of the block returned %d bytes: the cached decompressed block of the same offset was served (want the %d raw bytes)", len(forged), n)
 	}
 }

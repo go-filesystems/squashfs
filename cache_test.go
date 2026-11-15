@@ -55,20 +55,20 @@ func TestBlockCache_MetaEviction(t *testing.T) {
 func TestBlockCache_DataHitMissEviction(t *testing.T) {
 	c := newBlockCache()
 	c.dataCap = 2
-	if _, ok := c.getData(5); ok {
+	if _, ok := c.getData(dk(5)); ok {
 		t.Fatal("expected miss")
 	}
-	c.putData(5, []byte("five"))
-	if b, ok := c.getData(5); !ok || !bytes.Equal(b, []byte("five")) {
+	c.putData(dk(5), []byte("five"))
+	if b, ok := c.getData(dk(5)); !ok || !bytes.Equal(b, []byte("five")) {
 		t.Fatalf("data hit mismatch: %v %q", ok, b)
 	}
-	c.putData(5, []byte("FIVE")) // overwrite, no growth
+	c.putData(dk(5), []byte("FIVE")) // overwrite, no growth
 	if len(c.dataKeys) != 1 {
 		t.Fatalf("data re-put grew key list to %d", len(c.dataKeys))
 	}
-	c.putData(6, []byte("six"))
-	c.putData(7, []byte("seven")) // evicts offset 5
-	if _, ok := c.getData(5); ok {
+	c.putData(dk(6), []byte("six"))
+	c.putData(dk(7), []byte("seven")) // evicts offset 5
+	if _, ok := c.getData(dk(5)); ok {
 		t.Fatal("offset 5 should have been evicted")
 	}
 }
@@ -81,8 +81,11 @@ func TestBlockCache_NilSafe(t *testing.T) {
 		t.Fatal("nil getMeta should miss")
 	}
 	c.putMeta(1, metaEntry{}) // no panic, no store
-	if _, ok := c.getData(1); ok {
+	if _, ok := c.getData(dk(1)); ok {
 		t.Fatal("nil getData should miss")
 	}
-	c.putData(1, nil) // no panic, no store
+	c.putData(dk(1), nil) // no panic, no store
 }
+
+// dk is a data-cache key for a block at offset n.
+func dk(n int64) dataKey { return dataKey{off: n} }

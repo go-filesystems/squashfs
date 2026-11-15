@@ -30,11 +30,11 @@ type metaEntry struct {
 type blockCache struct {
 	mu       sync.Mutex
 	meta     map[int64]metaEntry // decompressed metadata blocks
-	data     map[int64][]byte    // decompressed data/fragment blocks
+	data     map[dataKey][]byte  // decompressed data/fragment blocks
 	metaCap  int
 	dataCap  int
 	metaKeys []int64 // insertion order, for FIFO eviction once metaCap is hit
-	dataKeys []int64
+	dataKeys []dataKey
 	frag     map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
 	fragKeys []uint32
 }
@@ -50,7 +50,7 @@ const (
 func newBlockCache() *blockCache {
 	return &blockCache{
 		meta:    make(map[int64]metaEntry),
-		data:    make(map[int64][]byte),
+		data:    make(map[dataKey][]byte),
 		metaCap: defaultMetaCacheBlocks,
 		dataCap: defaultDataCacheBlocks,
 	}
@@ -89,33 +89,41 @@ func (c *blockCache) putMeta(off int64, e metaEntry) {
 }
 
 // getData returns a cached decompressed data/fragment block, or false if absent.
-func (c *blockCache) getData(off int64) ([]byte, bool) {
+func (c *blockCache) getData(k dataKey) ([]byte, bool) {
 	if c == nil {
 		return nil, false
 	}
 	c.mu.Lock()
-	b, ok := c.data[off]
+	b, ok := c.data[k]
 	c.mu.Unlock()
 	return b, ok
 }
 
 // putData stores a decompressed data/fragment block, evicting the oldest entry
 // if the cap is exceeded. The cached slice must not be mutated by callers.
-func (c *blockCache) putData(off int64, b []byte) {
+func (c *blockCache) putData(k dataKey, b []byte) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	if _, exists := c.data[off]; !exists {
+	if _, exists := c.data[k]; !exists {
 		if len(c.data) >= c.dataCap && len(c.dataKeys) > 0 {
 			old := c.dataKeys[0]
 			c.dataKeys = c.dataKeys[1:]
 			delete(c.data, old)
 		}
-		c.dataKeys = append(c.dataKeys, off)
+		c.dataKeys = append(c.dataKeys, k)
 	}
-	c.data[off] = b
+	c.data[k] = b
 	c.mu.Unlock()
+}
+
+// dataKey identifies a cached data/fragment block by where it is AND how it was
+// read: the offset alone let a crafted image name one offset as a compressed
+// block and as a raw one and be served the bytes of whichever came first.
+type dataKey struct {
+	off      int64
+	sizeWord uint32 // on-disk length and the uncompressed bit
 }
 
 // maxFragCache bounds the cached fragment-table entries (16 bytes of map entry

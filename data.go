@@ -100,7 +100,7 @@ func (fs *FS) readBlockOpt(off int64, sizeWord uint32, cacheRaw bool) ([]byte, e
 		return nil, err
 	}
 	if compressed || cacheRaw {
-		if b, ok := fs.cache.getData(off); ok {
+		if b, ok := fs.cache.getData(dataKey{off, sizeWord}); ok {
 			return b, nil
 		}
 	}
@@ -110,7 +110,7 @@ func (fs *FS) readBlockOpt(off int64, sizeWord uint32, cacheRaw bool) ([]byte, e
 	}
 	if !compressed {
 		if cacheRaw {
-			fs.cache.putData(off, raw)
+			fs.cache.putData(dataKey{off, sizeWord}, raw)
 		}
 		return raw, nil
 	}
@@ -118,7 +118,7 @@ func (fs *FS) readBlockOpt(off int64, sizeWord uint32, cacheRaw bool) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	fs.cache.putData(off, out)
+	fs.cache.putData(dataKey{off, sizeWord}, out)
 	return out, nil
 }
 
