@@ -56,6 +56,7 @@ type node struct {
 	uid, gid uint32
 	target   string  // symlink target
 	data     []byte  // regular-file contents
+	mtime    uint32  // modification time, unix seconds (clamped to uint32)
 	children []*node // directory entries
 	// filled in during emit:
 	inodeRef uint64
@@ -83,7 +84,7 @@ func scanDir(dir string) (*node, error) {
 	if err != nil {
 		return nil, err
 	}
-	root := &node{name: "", mode: sIFDIR | uint16(fi.Mode().Perm())}
+	root := &node{name: "", mode: sIFDIR | uint16(fi.Mode().Perm()), mtime: unixSeconds(fi)}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -107,7 +108,7 @@ func scanEntry(path, name string) (*node, error) {
 	}
 	switch {
 	case fi.IsDir():
-		n := &node{name: name, mode: sIFDIR | uint16(fi.Mode().Perm())}
+		n := &node{name: name, mode: sIFDIR | uint16(fi.Mode().Perm()), mtime: unixSeconds(fi)}
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			return nil, err
@@ -127,13 +128,13 @@ func scanEntry(path, name string) (*node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &node{name: name, mode: sIFLNK | 0o777, target: target}, nil
+		return &node{name: name, mode: sIFLNK | 0o777, target: target, mtime: unixSeconds(fi)}, nil
 	case fi.Mode().IsRegular():
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
-		return &node{name: name, mode: sIFREG | uint16(fi.Mode().Perm()), data: data}, nil
+		return &node{name: name, mode: sIFREG | uint16(fi.Mode().Perm()), data: data, mtime: unixSeconds(fi)}, nil
 	default:
 		return nil, nil // skip devices/fifos/sockets for now
 	}
@@ -148,6 +149,7 @@ type imageWriter struct {
 	dirs      *metaWriter
 	inodeNum  uint32
 	blockSize uint32
+	modTime   uint32 // superblock mod_time
 
 	// Fragment packing state (used unless opts.NoFragments).
 	fragBuf     []byte          // pending uncompressed fragment block payload
@@ -211,7 +213,7 @@ func (iw *imageWriter) compress(payload []byte, forceRaw bool) (stored []byte, c
 
 // buildImage lays out and returns a complete SquashFS image for the tree.
 func buildImage(root *node, opts BuildOptions) ([]byte, error) {
-	iw := &imageWriter{opts: opts, blockSize: defaultBlockSize}
+	iw := &imageWriter{opts: opts, blockSize: defaultBlockSize, modTime: newestMTime(root)}
 	if !opts.Uncompressed {
 		c, err := newCompressor(opts.Compressor)
 		if err != nil {
@@ -270,7 +272,41 @@ func buildImage(root *node, opts BuildOptions) ([]byte, error) {
 		idTableStart, fragTableStart, uint32(len(iw.fragEntries)), bytesUsed)
 	out := iw.data.Bytes()
 	copy(out[:superblockSize], sb)
+	// mksquashfs pads the image to 4096 bytes, and so must we: a loop device or
+	// a block device is a whole number of sectors, and the kernel refuses (with
+	// no message) an image whose bytes_used lies beyond the device's end (#42).
+	// bytes_used itself stays the unpadded end, as mksquashfs leaves it.
+	if rem := len(out) % imagePad; rem != 0 {
+		out = append(out, make([]byte, imagePad-rem)...)
+	}
 	return out, nil
+}
+
+// imagePad is the alignment of the finished image (mksquashfs: 4096).
+const imagePad = 4096
+
+// unixSeconds is fi's modification time as unix seconds, clamped to the range
+// of the 32-bit field.
+func unixSeconds(fi os.FileInfo) uint32 {
+	s := fi.ModTime().Unix()
+	if s < 0 {
+		return 0
+	}
+	if s > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(s)
+}
+
+// newestMTime is the largest mtime in the tree.
+func newestMTime(n *node) uint32 {
+	m := n.mtime
+	for _, c := range n.children {
+		if v := newestMTime(c); v > m {
+			m = v
+		}
+	}
+	return m
 }
 
 // bytesUsedNoTable is the FragTableStart value written when there are no
@@ -404,9 +440,9 @@ func (iw *imageWriter) emitFileInode(n *node) error {
 	hdr := make([]byte, 16+16)
 	le.PutUint16(hdr[0:], inodeBasicFile)
 	le.PutUint16(hdr[2:], n.mode&0o7777)
-	le.PutUint16(hdr[4:], 0) // uid idx
-	le.PutUint16(hdr[6:], 0) // gid idx
-	le.PutUint32(hdr[8:], 0) // mtime
+	le.PutUint16(hdr[4:], 0)       // uid idx
+	le.PutUint16(hdr[6:], 0)       // gid idx
+	le.PutUint32(hdr[8:], n.mtime) // mtime
 	le.PutUint32(hdr[12:], n.inodeNum)
 	le.PutUint32(hdr[16:], uint32(blocksStart)) // start_block (32-bit)
 	le.PutUint32(hdr[20:], fragIdx)             // fragment table index
@@ -469,6 +505,7 @@ func (iw *imageWriter) emitSymlinkInode(n *node) {
 	body := make([]byte, 16+8)
 	le.PutUint16(body[0:], inodeBasicSymlink)
 	le.PutUint16(body[2:], n.mode&0o7777)
+	le.PutUint32(body[8:], n.mtime)
 	le.PutUint32(body[12:], n.inodeNum)
 	le.PutUint32(body[16:], 1) // nlink
 	le.PutUint32(body[20:], uint32(len(n.target)))
@@ -495,6 +532,7 @@ func (iw *imageWriter) emitDirInode(n *node) error {
 	body := make([]byte, 16+16)
 	le.PutUint16(body[0:], inodeBasicDir)
 	le.PutUint16(body[2:], n.mode&0o7777)
+	le.PutUint32(body[8:], n.mtime)
 	le.PutUint32(body[12:], n.inodeNum)
 	le.PutUint32(body[16:], dirBlock)                  // start_block (dir table)
 	le.PutUint32(body[20:], uint32(len(n.children))+2) // nlink (entries + . + ..)
@@ -562,7 +600,7 @@ func (iw *imageWriter) superblock(rootRef uint64, inodeCount uint32, inodeStart,
 	b := make([]byte, superblockSize)
 	le.PutUint32(b[0x00:], Magic)
 	le.PutUint32(b[0x04:], inodeCount)
-	le.PutUint32(b[0x08:], 0) // mod_time
+	le.PutUint32(b[0x08:], iw.modTime) // mod_time: the newest inode
 	le.PutUint32(b[0x0C:], iw.blockSize)
 	le.PutUint32(b[0x10:], fragCount)
 	le.PutUint16(b[0x14:], compID)

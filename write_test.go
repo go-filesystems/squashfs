@@ -173,13 +173,14 @@ func TestWrite_Fragments(t *testing.T) {
 	}
 
 	// Fragment packing should shrink the image versus full-block storage.
-	si, err1 := os.Stat(withFrag)
-	ni, err2 := os.Stat(noFrag)
-	if err1 != nil || err2 != nil {
-		t.Fatalf("stat: %v %v", err1, err2)
+	// Compare bytes_used: the files themselves are padded to 4096.
+	nfs, err := OpenFile(noFrag)
+	if err != nil {
+		t.Fatalf("OpenFile(noFrag): %v", err)
 	}
-	if si.Size() >= ni.Size() {
-		t.Errorf("fragment image (%d) not smaller than no-fragment image (%d)", si.Size(), ni.Size())
+	defer nfs.Close()
+	if sb.BytesUsed >= nfs.Superblock().BytesUsed {
+		t.Errorf("fragment image (%d bytes used) not smaller than no-fragment image (%d)", sb.BytesUsed, nfs.Superblock().BytesUsed)
 	}
 }
 

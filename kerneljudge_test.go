@@ -47,14 +47,6 @@ func kernelJudgeDriver() kj.Driver {
 			{"unsquashfs", "-stat", "{img}"},
 		},
 		Compare: kj.Compare{Mtime: true, Xattrs: true, Perm: true},
-		Known: []kj.Known{
-			{Test: `/write-xz$`, Match: `^kernel mount: .*xz decompression|^kernel mount: kernel mount of ours.img`, Issue: "squashfs#46"},
-			{Test: `/write-`, Match: `^kernel mount: image size .* not a multiple of 4096`, Issue: "squashfs#42"},
-			{Test: `/write-`, Match: `^kernel mount vs corpus: .*: mtime want`, Issue: "squashfs#43"},
-			{Match: `^our reader errors: .*: Stat: `, Issue: "squashfs#44"},
-			{Match: `^our reader vs corpus: /\S*link\S*: (missing|kind want symlink)`, Issue: "squashfs#44"},
-			{Match: `^our reader vs corpus: .*: mtime want`, Issue: "squashfs#45"},
-		},
 	}
 }
 

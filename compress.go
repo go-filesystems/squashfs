@@ -95,7 +95,12 @@ func (xzCompressor) id() uint16 { return compXZ }
 
 func (xzCompressor) compress(src []byte) ([]byte, error) {
 	var b bytes.Buffer
-	w, err := xz.NewWriter(&b)
+	// The kernel's xz decoder allocates a dictionary of the filesystem block
+	// size and refuses a stream that declares a larger one ("xz decompression
+	// failed, data probably corrupt"), and its embedded decoder carries CRC32
+	// reliably: so a block-size dictionary and a CRC32 check, as mksquashfs
+	// writes (#46). The Go encoder's default is an 8 MiB dictionary and CRC64.
+	w, err := xz.WriterConfig{DictCap: defaultBlockSize, CheckSum: xz.CRC32}.NewWriter(&b)
 	if err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	filesystem "github.com/go-filesystems/interface"
 )
@@ -132,14 +133,38 @@ func (fs *FS) ListDir(path string) ([]filesystem.DirEntry, error) {
 	return out, nil
 }
 
-// Stat resolves path (following symlinks) and returns mode, size and inode.
+// Stat resolves path and returns mode, size and inode. Symlinks in the parent
+// components are followed but the final component is NOT (lstat semantics, as
+// btrfs does): a symlink answers with its own mode (S_IFLNK) and the length of
+// its target as size, and a dangling one is not an error. ReadLink returns the
+// target. (Before, Stat followed the link, so links read as the files they
+// point to and a dangling one failed a directory listing: #44.)
 func (fs *FS) Stat(path string) (filesystem.Stat, error) {
-	in, err := resolve(fs, path, true)
+	in, err := resolve(fs, path, false)
 	if err != nil {
 		return nil, err
 	}
-	return filesystem.NewStat(in.Mode, in.Size, uint64(in.Number)), nil
+	size := in.Size
+	if in.isSymlink() {
+		size = uint64(len(in.symlinkTarget))
+	}
+	return filesystem.NewStat(in.Mode, size, uint64(in.Number)), nil
 }
+
+// Times returns the modification time recorded in the inode (the only time
+// SquashFS stores, in whole seconds); the other three are not recorded. A
+// symbolic link is not followed.
+func (fs *FS) Times(path string) (filesystem.FileTimes, error) {
+	in, err := resolve(fs, path, false)
+	if err != nil {
+		return filesystem.FileTimes{}, err
+	}
+	return filesystem.FileTimes{
+		Mtime: filesystem.NewTimestamp(time.Unix(int64(in.Mtime), 0).UTC(), time.Second),
+	}, nil
+}
+
+var _ filesystem.TimesReader = (*FS)(nil)
 
 // Xattrs resolves path (following symlinks) and returns its extended
 // attributes, keyed by fully-qualified name (with the namespace prefix, e.g.
