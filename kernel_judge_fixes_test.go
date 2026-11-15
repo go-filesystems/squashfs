@@ -38,7 +38,10 @@ func buildJudgeImage(t *testing.T, opts BuildOptions) (img string, when time.Tim
 func TestBuiltImageIsPaddedTo4096(t *testing.T) {
 	for _, o := range []BuildOptions{{}, {Uncompressed: true}, {Compressor: CompressXZ}, {Compressor: CompressZSTD}, {Compressor: CompressLZ4}} {
 		img, _ := buildJudgeImage(t, o)
-		fi, _ := os.Stat(img)
+		fi, serr := os.Stat(img)
+		if serr != nil {
+			t.Fatal(serr)
+		}
 		if fi.Size()%4096 != 0 {
 			t.Errorf("%+v: image is %d bytes, not a multiple of 4096", o, fi.Size())
 		}
