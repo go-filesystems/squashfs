@@ -123,16 +123,17 @@ The Linux kernel (6.17) and squashfs-tools 4.6.1, run as root in a Tart VM by
 UTF-8 names, a sparse and a 32 MiB file, symlinks, xattrs, times) by
 `unsquashfs -lls` and `-stat`, a read-only kernel mount and this reader. Reverse:
 `mksquashfs` with gzip, lzo, lz4, xz, zstd and no compression writes the images
-and this reader reads them (clean except the points below). `BuildFromDir` is
-judged for gzip, none, zstd, xz and lz4; its images pass `unsquashfs` but the
-kernel refuses them unless padded. Open defects found this way, logged as
-`KNOWN DEFECT` by the test:
-[#42](https://github.com/go-filesystems/squashfs/issues/42) (image not padded),
-[#43](https://github.com/go-filesystems/squashfs/issues/43) (mtime lost),
-[#44](https://github.com/go-filesystems/squashfs/issues/44) (`Stat` follows
-symlinks), [#45](https://github.com/go-filesystems/squashfs/issues/45) (no
-`TimesReader`), [#46](https://github.com/go-filesystems/squashfs/issues/46) (xz
-images fail in the kernel). Against the kernel on one image (4000 small files, a
+and this reader reads them. `BuildFromDir` is judged for gzip, none, zstd, xz
+and lz4. Both directions are clean, with no known defect. It found, and this
+release fixed,
+[#42](https://github.com/go-filesystems/squashfs/issues/42) (the image is padded
+to 4096 as `mksquashfs` does; the kernel refused it on a loop device),
+[#43](https://github.com/go-filesystems/squashfs/issues/43) (source mtimes are
+kept), [#44](https://github.com/go-filesystems/squashfs/issues/44) (`Stat` no
+longer follows the final symlink), [#45](https://github.com/go-filesystems/squashfs/issues/45)
+(`Times` implements `filesystem.TimesReader`) and
+[#46](https://github.com/go-filesystems/squashfs/issues/46) (the xz encoder uses a
+block-size dictionary and CRC32, which the kernel's decoder accepts). Against the kernel on one image (4000 small files, a
 256 MiB file): metadata walk 35758 files/s against 54134 for the kernel; the
 sequential read figure is not a storage comparison (host-cached VM disk), see
 the kerneljudge README.
@@ -141,8 +142,10 @@ the kerneljudge README.
 
 - Reading: gzip, xz, zstd, LZO, lz4 and legacy standalone lzma blocks are all
   decoded; xz blocks may carry the Delta and BCJ filters.
-- Writing (`BuildFromDir`): produces gzip or uncompressed images; files are
-  stored as full data blocks (no tail-end fragment packing yet), all owned by
-  uid/gid 0, no xattrs. Once written, an image is immutable (no in-place edits).
-- Extended attributes (xattr table) are not surfaced.
+- Writing (`BuildFromDir`): gzip, zstd, xz, lz4 or uncompressed images, with
+  fragment packing, modification times kept, all owned by uid/gid 0, no xattrs.
+  The image is padded to 4096 bytes. Once written, an image is immutable (no
+  in-place edits).
+- Extended attributes are read (`(*FS).Xattrs`); the builder does not write them.
+- `Stat` does not follow a final symlink (lstat); `ReadLink` gives the target.
 - Intended for tooling and testing.
