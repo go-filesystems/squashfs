@@ -36,7 +36,7 @@ func xzStored(payload []byte, filters ...[]byte) []byte {
 	for _, f := range filters {
 		hdr = append(hdr, f...)
 	}
-	hdr = append(hdr, 0x21, 1, 0x10) // LZMA2, one property byte, 64 KiB dictionary
+	hdr = append(hdr, 0x21, 1, 0x10)    // LZMA2, one property byte, 64 KiB dictionary
 	hdr = append(pad4(hdr), 0, 0, 0, 0) // room for the CRC32
 	hdr[0] = byte(len(hdr)/4 - 1)
 	copy(hdr[len(hdr)-4:], crc(hdr[:len(hdr)-4]))

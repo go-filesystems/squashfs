@@ -114,6 +114,29 @@ input-driven allocation is therefore bounded **before** it is made
 Fuzz targets: `FuzzOpenRead`, `FuzzReadFile`, `FuzzReadMetaBlock`,
 `FuzzReadDir`, `FuzzDecompress`, `FuzzReadInode`, `FuzzReadXattr`.
 
+## Judged by
+
+The Linux kernel (6.17) and squashfs-tools 4.6.1, run as root in a Tart VM by
+[kerneljudge](https://github.com/go-filesystems/kerneljudge) (`kerneljudge run
+--driver <clone>`; the test is `kerneljudge_test.go`, behind
+`FS_KERNEL_JUDGE=1`). Each image is held to a fixed corpus (nested directories,
+UTF-8 names, a sparse and a 32 MiB file, symlinks, xattrs, times) by
+`unsquashfs -lls` and `-stat`, a read-only kernel mount and this reader. Reverse:
+`mksquashfs` with gzip, lzo, lz4, xz, zstd and no compression writes the images
+and this reader reads them (clean except the points below). `BuildFromDir` is
+judged for gzip, none, zstd, xz and lz4; its images pass `unsquashfs` but the
+kernel refuses them unless padded. Open defects found this way, logged as
+`KNOWN DEFECT` by the test:
+[#42](https://github.com/go-filesystems/squashfs/issues/42) (image not padded),
+[#43](https://github.com/go-filesystems/squashfs/issues/43) (mtime lost),
+[#44](https://github.com/go-filesystems/squashfs/issues/44) (`Stat` follows
+symlinks), [#45](https://github.com/go-filesystems/squashfs/issues/45) (no
+`TimesReader`), [#46](https://github.com/go-filesystems/squashfs/issues/46) (xz
+images fail in the kernel). Against the kernel on one image (4000 small files, a
+256 MiB file): metadata walk 35758 files/s against 54134 for the kernel; the
+sequential read figure is not a storage comparison (host-cached VM disk), see
+the kerneljudge README.
+
 ## Limitations
 
 - Reading: gzip, xz, zstd, LZO, lz4 and legacy standalone lzma blocks are all
