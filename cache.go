@@ -35,6 +35,8 @@ type blockCache struct {
 	dataCap  int
 	metaKeys []int64 // insertion order, for FIFO eviction once metaCap is hit
 	dataKeys []int64
+	frag     map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
+	fragKeys []uint32
 }
 
 // Default cache caps. Metadata blocks are tiny (<= 8 KiB) and few, so we keep a
@@ -113,5 +115,38 @@ func (c *blockCache) putData(off int64, b []byte) {
 		c.dataKeys = append(c.dataKeys, off)
 	}
 	c.data[off] = b
+	c.mu.Unlock()
+}
+
+// maxFragCache bounds the cached fragment-table entries (16 bytes of map entry
+// each): FragCount comes from the image and can name billions.
+const maxFragCache = 4096
+
+func (c *blockCache) getFrag(idx uint32) (fragmentEntry, bool) {
+	if c == nil {
+		return fragmentEntry{}, false
+	}
+	c.mu.Lock()
+	e, ok := c.frag[idx]
+	c.mu.Unlock()
+	return e, ok
+}
+
+func (c *blockCache) putFrag(idx uint32, e fragmentEntry) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.frag == nil {
+		c.frag = make(map[uint32]fragmentEntry)
+	}
+	if _, exists := c.frag[idx]; !exists {
+		if len(c.frag) >= maxFragCache && len(c.fragKeys) > 0 {
+			delete(c.frag, c.fragKeys[0])
+			c.fragKeys = c.fragKeys[1:]
+		}
+		c.fragKeys = append(c.fragKeys, idx)
+	}
+	c.frag[idx] = e
 	c.mu.Unlock()
 }
