@@ -69,7 +69,8 @@ func (f *squashfsFile) prefetch(first, count int, ahead bool) {
 		return
 	}
 	last := min(first+count, len(f.blockOffsets))
-	todo := make([]int, 0, min(last-first, maxWindow))
+	var arr [maxWindow]int // on the stack: the common call (nothing to do) allocates nothing
+	todo := arr[:0]
 	for i := first; i < last && len(todo) < maxWindow; i++ {
 		n, compressed := blockOnDiskSize(f.blockWords[i])
 		if n == 0 || !compressed {
@@ -86,9 +87,10 @@ func (f *squashfsFile) prefetch(first, count int, ahead bool) {
 	if ahead && todo[0] != first && len(todo) < w {
 		return // the reader's next block is ready; wait for a full batch
 	}
-	_ = inflight.Ordered(context.Background(), len(todo), w,
+	run := append([]int(nil), todo...) // the closure outlives arr's frame use
+	_ = inflight.Ordered(context.Background(), len(run), w,
 		func(_ context.Context, k int) (struct{}, error) {
-			i := todo[k]
+			i := run[k]
 			_, _ = f.fs.readBlock(f.blockOffsets[i], f.blockWords[i]) // error: reported by the read itself
 			return struct{}{}, nil
 		},
