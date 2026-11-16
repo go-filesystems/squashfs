@@ -9,12 +9,14 @@ require github.com/go-filesystems/squashfs v0.4.0
 
 require (
 	github.com/anchore/go-lzo v0.1.1 // indirect
+	github.com/go-compressions/lz4 v0.4.2-0.20261116141435-c470dca2f2b4 // indirect
 	github.com/go-compressions/xz v0.1.0 // indirect
 	github.com/go-filesystems/interface v0.6.0 // indirect
+	github.com/go-simd/matchlen v0.5.0 // indirect
 	github.com/go-volumes/safeio v0.0.0-20261011024942-5635ea21db3b // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
-	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/ulikunitz/xz v0.5.17 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
 
 replace github.com/go-filesystems/squashfs => ..
