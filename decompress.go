@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	lzo "github.com/anchore/go-lzo"
+	"github.com/go-compressions/lzo"
 	"github.com/go-compressions/xz"
 	"github.com/go-compressions/xz/lzma"
 	"github.com/klauspost/compress/zlib"
@@ -170,7 +170,7 @@ type lzoDecompressor struct{}
 
 func (lzoDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	dst := make([]byte, maxOut)
-	n, err := lzo.Decompress(src, dst)
+	n, err := lzo.DecodeBlock(dst, src)
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: lzo: %w", err)
 	}
