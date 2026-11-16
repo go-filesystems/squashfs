@@ -11,11 +11,11 @@ import (
 	"io"
 
 	lzo "github.com/anchore/go-lzo"
+	"github.com/go-compressions/lz4"
 	"github.com/go-compressions/xz"
 	"github.com/go-compressions/xz/lzma"
 	"github.com/klauspost/compress/zlib"
 	"github.com/klauspost/compress/zstd"
-	"github.com/pierrec/lz4/v4"
 )
 
 // decompressor decompresses a single SquashFS block. Implementations are
@@ -182,7 +182,7 @@ type lz4Decompressor struct{}
 
 func (lz4Decompressor) decompress(src []byte, maxOut int) ([]byte, error) {
 	dst := make([]byte, maxOut)
-	n, err := lz4.UncompressBlock(src, dst)
+	n, err := lz4.DecodeBlock(dst, src)
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: lz4: %w", err)
 	}

@@ -8,8 +8,8 @@ import (
 	"compress/zlib"
 	"fmt"
 
+	"github.com/go-compressions/lz4"
 	"github.com/klauspost/compress/zstd"
-	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
 )
 
@@ -120,15 +120,9 @@ type lz4Compressor struct{}
 func (lz4Compressor) id() uint16 { return compLZ4 }
 
 func (lz4Compressor) compress(src []byte) ([]byte, error) {
-	dst := make([]byte, lz4.CompressBlockBound(len(src)))
-	var c lz4.Compressor
-	n, err := c.CompressBlock(src, dst)
-	if err != nil {
-		return nil, err
-	}
-	if n == 0 {
-		// LZ4 reports incompressible input as n==0; signal "store raw".
+	out := lz4.CompressBlock(src)
+	if len(out) == 0 {
 		return nil, fmt.Errorf("squashfs: lz4 block incompressible")
 	}
-	return dst[:n], nil
+	return out, nil
 }
