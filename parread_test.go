@@ -225,7 +225,7 @@ func TestParallelReadError(t *testing.T) {
 	buf := make([]byte, 1<<20)
 	f8, _ := openPar(t, img, 8).OpenFile("/big.bin")
 	f1, _ := openPar(t, img, 1).OpenFile("/big.bin")
-	for off := int64(0); off < 6<<17; off += int64(len(buf)) {
+	for off := int64(0); off < int64(len(body)); off += int64(len(buf)) {
 		_, e1 := f1.ReadAt(buf, off)
 		_, e8 := f8.ReadAt(buf, off)
 		if (e1 == nil) != (e8 == nil) || (e1 != nil && !errors.Is(e8, ErrCorrupt) && e1.Error() != e8.Error()) {

@@ -25,7 +25,11 @@ import (
 const maxReadParallelism = 8
 
 // maxWindow is the most blocks one decode window covers: half the data cache,
-// so a window cannot evict the blocks the same read is about to copy out.
+// so a window cannot evict the blocks the same read is about to copy out. A
+// single ReadAt larger than maxWindow blocks (4 MiB at the default block size)
+// is decoded in parallel for its first maxWindow blocks only; the rest decode
+// as the read reaches them. The bound is per call: G concurrent readers hold up
+// to G x workers blocks in flight.
 const maxWindow = defaultDataCacheBlocks / 2
 
 // defaultReadParallelism is min(GOMAXPROCS, maxReadParallelism), at least 1.
