@@ -25,6 +25,9 @@ type FS struct {
 	d      decompressor
 	closer io.Closer
 	cache  *blockCache // decompressed metadata + data/fragment block cache
+	// workers is how many data blocks of one read are decoded at once
+	// (SetReadParallelism); 1 is serial.
+	workers int
 }
 
 // Verify the package satisfies the common filesystem interface.
@@ -49,7 +52,7 @@ func Open(rs io.ReaderAt, size int64) (*FS, error) {
 	if err := readCompressorOptions(rs, sb); err != nil {
 		return nil, err
 	}
-	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache()}
+	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache(), workers: defaultReadParallelism()}
 	if c, ok := rs.(io.Closer); ok {
 		fs.closer = c
 	}
