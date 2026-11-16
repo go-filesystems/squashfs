@@ -1,7 +1,7 @@
 github.com/go-compressions/appleoracle v0.3.0 h1:hNdRkdAFDOtbypzcuray4wtER3pWghRFkl/Ygck3r6s=
 github.com/go-compressions/appleoracle v0.3.0/go.mod h1:oKtBkLzNNzAMRv1EpgO0v22V662XXSf0FkhE46j3OtY=
-github.com/go-compressions/lz4 v0.5.0 h1:YqosDRpHbPADjrKaGMoB2McZQSQjosKI7yaId7uQlPg=
-github.com/go-compressions/lz4 v0.5.0/go.mod h1:/SiFQqIBd2i+rm4zVmLUI1PEDYR9mG/iyVtMb6EZHhc=
+github.com/go-compressions/lz4 v0.5.1 h1:MjdpSf28iWe6I+gv6T/KNOiqYb+VzQfajqPZ4eTQnLA=
+github.com/go-compressions/lz4 v0.5.1/go.mod h1:/SiFQqIBd2i+rm4zVmLUI1PEDYR9mG/iyVtMb6EZHhc=
 github.com/go-compressions/lzo v0.4.0 h1:SrC54LEXtNCbS7J6biCjW80U7Trx76okNzU+CFOJZbM=
 github.com/go-compressions/lzo v0.4.0/go.mod h1:dJtx0L0j59FkTKSVa5mu6JEXAeOKi9t9Z89SccSM2A4=
 github.com/go-compressions/xz v0.1.0 h1:uBcHmr/IXwk5mNnuOIz4E2rU3aNl9mVOwIQjMgPy0g8=

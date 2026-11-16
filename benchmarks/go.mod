@@ -8,7 +8,7 @@ go 1.27.1
 require github.com/go-filesystems/squashfs v0.4.0
 
 require (
-	github.com/go-compressions/lz4 v0.5.0 // indirect
+	github.com/go-compressions/lz4 v0.5.1 // indirect
 	github.com/go-compressions/lzo v0.4.0 // indirect
 	github.com/go-compressions/xz v0.1.0 // indirect
 	github.com/go-filesystems/interface v0.6.0 // indirect
