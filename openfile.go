@@ -51,6 +51,9 @@ type squashfsFile struct {
 	size       int64
 	blockSize  int64
 	closed     atomic.Bool
+	// lastEnd is the offset one past the last byte the previous ReadAt asked
+	// for; a read starting there is "sequential" and triggers read-ahead.
+	lastEnd atomic.Int64
 }
 
 var _ filesystem.File = (*squashfsFile)(nil)
@@ -143,6 +146,7 @@ func (f *squashfsFile) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 	n := 0
+	f.readAhead(off, int(min(int64(len(p)), f.size-off)))
 	for n < len(p) {
 		cur := off + int64(n)
 		if cur >= f.size {

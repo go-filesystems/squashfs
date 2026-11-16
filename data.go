@@ -4,9 +4,11 @@
 package squashfs
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 
+	"github.com/go-filesystems/inflight"
 	"github.com/go-volumes/safeio"
 )
 
@@ -196,27 +198,56 @@ func readFileLimit(fs *FS, in *inode, max int64) ([]byte, error) {
 	}
 	out := hint[:0]
 
-	for _, sz := range in.blockSizes {
+	// offs[i] is block i's absolute offset (only when decoding in parallel).
+	emit := func(i int, data []byte) error {
 		want := blockSize
 		if remaining < want {
 			want = remaining
 		}
-		n, _ := blockOnDiskSize(sz)
-		if n == 0 {
+		if n, _ := blockOnDiskSize(in.blockSizes[i]); n == 0 {
 			// Sparse block: a full block of zeros (clamped to the file tail).
 			out = append(out, make([]byte, want)...)
 		} else {
-			data, err := fs.readBlock(off, sz)
-			if err != nil {
-				return nil, err
-			}
 			if uint64(len(data)) < want {
-				return nil, fmt.Errorf("%w: short data block (%d < %d)", ErrCorrupt, len(data), want)
+				return fmt.Errorf("%w: short data block (%d < %d)", ErrCorrupt, len(data), want)
 			}
 			out = append(out, data[:want]...)
-			off += n
 		}
 		remaining -= want
+		return nil
+	}
+	if w := fs.readWorkers(); w >= 2 && len(in.blockSizes) >= 2 {
+		// The blocks are independent: decode them on w goroutines, appended in
+		// file order by inflight.Ordered (at most w decoded blocks held).
+		offs := make([]int64, len(in.blockSizes))
+		for i, sz := range in.blockSizes {
+			offs[i] = off
+			off += blockOnDiskBytes(sz)
+		}
+		err := inflight.Ordered(context.Background(), len(in.blockSizes), w,
+			func(_ context.Context, i int) ([]byte, error) {
+				if n, _ := blockOnDiskSize(in.blockSizes[i]); n == 0 {
+					return nil, nil
+				}
+				return fs.readBlock(offs[i], in.blockSizes[i])
+			}, emit)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		for i, sz := range in.blockSizes {
+			var data []byte
+			n, _ := blockOnDiskSize(sz)
+			if n != 0 {
+				if data, err = fs.readBlock(off, sz); err != nil {
+					return nil, err
+				}
+				off += n
+			}
+			if err := emit(i, data); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Tail-end fragment, if any.

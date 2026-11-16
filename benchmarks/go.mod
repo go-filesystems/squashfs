@@ -11,6 +11,7 @@ require (
 	github.com/go-compressions/lz4 v0.5.1 // indirect
 	github.com/go-compressions/lzo v0.4.0 // indirect
 	github.com/go-compressions/xz v0.1.0 // indirect
+	github.com/go-filesystems/inflight v0.3.0 // indirect
 	github.com/go-filesystems/interface v0.6.0 // indirect
 	github.com/go-simd/matchlen v0.5.0 // indirect
 	github.com/go-volumes/safeio v0.0.0-20261011024942-5635ea21db3b // indirect
