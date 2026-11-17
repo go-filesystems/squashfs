@@ -3,7 +3,11 @@
 
 package squashfs
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/go-filesystems/inflight"
+)
 
 // metaEntry is a decompressed metadata block plus the absolute file offset of
 // the block that follows it on disk.
@@ -22,28 +26,21 @@ type metaEntry struct {
 // map lookups, which is the dominant read-throughput win.
 //
 // The cache is mutex-guarded so it preserves FS's documented
-// safe-for-concurrent-use contract. Bounding is by entry count: metadata blocks
-// are <= 8 KiB and data/fragment blocks <= block_size (default 128 KiB), and the
-// total metadata region of a real image is a few thousand blocks at most, so a
-// generous cap keeps memory predictable while still serving an entire walk from
-// cache in practice.
+// safe-for-concurrent-use contract. Metadata blocks are bounded by entry count
+// (<= 8 KiB each, and the metadata region of a real image is a few thousand
+// blocks at most). Data and fragment blocks live in an [inflight.Cache], the
+// adaptive byte-bounded cache this package's own was extracted into: it starts
+// at defaultDataCacheBlocks blocks and grows (to the bound of
+// [FS.SetMaxDataCache]) only when a block that was evicted is requested again.
 type blockCache struct {
 	mu       sync.Mutex
 	meta     map[int64]metaEntry // decompressed metadata blocks
-	data     map[dataKey][]byte  // decompressed data/fragment blocks
 	metaCap  int
-	dataCap  int
-	metaKeys []int64 // insertion order, for FIFO eviction once metaCap is hit
-	dataKeys []dataKey
-	// dataCap starts at defaultDataCacheBlocks and grows (to dataCapMax) only
-	// when a block that was evicted is requested again: a random read of a file
-	// larger than the cache does at once; one sequential pass never does, a
-	// second pass over a file larger than the cache does.
-	dataCapMax int
-	ghost      map[dataKey]struct{} // keys of evicted data blocks, at most ghostCap
-	ghostKeys  []dataKey
-	frag       map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
-	fragKeys   []uint32
+	metaKeys []int64                  // insertion order, for FIFO eviction once metaCap is hit
+	frag     map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
+	fragKeys []uint32
+
+	data *inflight.Cache[dataKey, []byte] // decompressed data/fragment blocks
 }
 
 // Default cache caps. Metadata blocks are tiny (<= 8 KiB) and few, so we keep a
@@ -52,7 +49,6 @@ type blockCache struct {
 const (
 	defaultMetaCacheBlocks = 16384 // up to ~128 MiB of metadata, normally far less
 	defaultDataCacheBlocks = 64    // up to ~8 MiB at the 128 KiB default block size
-	ghostCap               = 16384 // evicted data-block keys remembered (16 bytes each)
 
 	// DefaultMaxDataCacheBytes is how far the data cache may grow, when the
 	// workload re-reads blocks it evicted, before it stops: 256 MiB of decoded
@@ -61,14 +57,19 @@ const (
 	DefaultMaxDataCacheBytes = 256 << 20
 )
 
-func newBlockCache() *blockCache {
+// newBlockCache returns a cache whose data part starts at
+// defaultDataCacheBlocks blocks of blockSize bytes (each counted at no less
+// than minCountedBlock) and may grow to DefaultMaxDataCacheBytes.
+func newBlockCache(blockSize int64) *blockCache {
+	start := defaultDataCacheBlocks * max(blockSize, minCountedBlock)
 	return &blockCache{
 		meta:    make(map[int64]metaEntry),
-		data:    make(map[dataKey][]byte),
 		metaCap: defaultMetaCacheBlocks,
-		dataCap: defaultDataCacheBlocks,
-
-		dataCapMax: defaultDataCacheBlocks,
+		data: inflight.NewCache[dataKey, []byte](start, DefaultMaxDataCacheBytes, func(b []byte) int64 {
+			// Counted at no less than 4 KiB (mksquashfs writes no block smaller),
+			// so crafted tiny blocks cannot become hundreds of millions of entries.
+			return max(int64(len(b)), minCountedBlock)
+		}),
 	}
 }
 
@@ -109,70 +110,25 @@ func (c *blockCache) getData(k dataKey) ([]byte, bool) {
 	if c == nil {
 		return nil, false
 	}
-	c.mu.Lock()
-	b, ok := c.data[k]
-	c.mu.Unlock()
-	return b, ok
+	return c.data.Get(k)
 }
 
-// putData stores a decompressed data/fragment block, evicting the oldest entry
-// if the cap is exceeded. The cached slice must not be mutated by callers.
+// putData stores a decompressed data/fragment block. The cached slice must not
+// be mutated by callers.
 func (c *blockCache) putData(k dataKey, b []byte) {
 	if c == nil {
 		return
 	}
-	c.mu.Lock()
-	if _, exists := c.data[k]; !exists {
-		if _, evicted := c.ghost[k]; evicted {
-			// A block we evicted is wanted again: the cache was too small for
-			// this workload, not merely cold. Grow it, up to its bound.
-			delete(c.ghost, k)
-			if c.dataCap < c.dataCapMax {
-				c.dataCap = min(c.dataCapMax, c.dataCap+max(1, c.dataCap/16))
-			}
-		}
-		if len(c.data) >= c.dataCap && len(c.dataKeys) > 0 {
-			old := c.dataKeys[0]
-			c.dataKeys = c.dataKeys[1:]
-			delete(c.data, old)
-			c.remember(old)
-		}
-		c.dataKeys = append(c.dataKeys, k)
-	}
-	c.data[k] = b
-	c.mu.Unlock()
+	c.data.Put(k, b)
 }
 
-// remember records the key of an evicted data block in the ghost set, a bounded
-// FIFO of keys only (no data). Called with c.mu held.
-func (c *blockCache) remember(k dataKey) {
-	if c.ghost == nil {
-		c.ghost = make(map[dataKey]struct{})
-	}
-	if len(c.ghostKeys) >= ghostCap {
-		delete(c.ghost, c.ghostKeys[0])
-		c.ghostKeys = c.ghostKeys[1:]
-	}
-	c.ghost[k] = struct{}{}
-	c.ghostKeys = append(c.ghostKeys, k)
-}
-
-// setDataCapMax sets the most data blocks the cache may grow to, never below
-// the starting size. A cache already above it shrinks to it at once.
-func (c *blockCache) setDataCapMax(n int) {
+// setDataCapMax sets the most bytes the data cache may grow to, never below
+// its starting size. A cache already above it shrinks to it at once.
+func (c *blockCache) setDataCapMax(bytes int64) {
 	if c == nil {
 		return
 	}
-	c.mu.Lock()
-	c.dataCapMax = max(n, defaultDataCacheBlocks)
-	if c.dataCap > c.dataCapMax {
-		c.dataCap = c.dataCapMax
-		for len(c.data) > c.dataCap && len(c.dataKeys) > 0 {
-			delete(c.data, c.dataKeys[0])
-			c.dataKeys = c.dataKeys[1:]
-		}
-	}
-	c.mu.Unlock()
+	c.data.SetMax(bytes)
 }
 
 // dataKey identifies a cached data/fragment block by where it is AND how it was

@@ -141,7 +141,7 @@ func TestParallelReadBounds(t *testing.T) {
 			t.Fatalf("workers=%d: never decoded in parallel", w)
 		}
 		fs.cache.mu.Lock()
-		n := len(fs.cache.data)
+		n := fs.cache.data.Len()
 		fs.cache.mu.Unlock()
 		if n > defaultDataCacheBlocks {
 			t.Fatalf("cache holds %d blocks, cap %d", n, defaultDataCacheBlocks)

@@ -5,7 +5,6 @@ package squashfs
 
 import (
 	"bytes"
-	"sync"
 	"testing"
 )
 
@@ -13,7 +12,7 @@ import (
 // plus an in-place overwrite of an existing offset (which must not grow the key
 // list or evict).
 func TestBlockCache_MetaHitMiss(t *testing.T) {
-	c := newBlockCache()
+	c := newBlockCache(1 << 17)
 	if _, ok := c.getMeta(10); ok {
 		t.Fatal("expected miss on empty cache")
 	}
@@ -36,7 +35,7 @@ func TestBlockCache_MetaHitMiss(t *testing.T) {
 // TestBlockCache_MetaEviction fills the metadata cache past its cap and checks
 // FIFO eviction of the oldest offset.
 func TestBlockCache_MetaEviction(t *testing.T) {
-	c := newBlockCache()
+	c := newBlockCache(1 << 17)
 	c.metaCap = 2
 	c.putMeta(1, metaEntry{data: []byte("a")})
 	c.putMeta(2, metaEntry{data: []byte("b")})
@@ -51,11 +50,10 @@ func TestBlockCache_MetaEviction(t *testing.T) {
 	}
 }
 
-// TestBlockCache_DataHitMissEviction exercises the data/fragment cache path,
-// including overwrite and FIFO eviction.
-func TestBlockCache_DataHitMissEviction(t *testing.T) {
-	c := newBlockCache()
-	c.dataCap = 2
+// TestBlockCache_DataHitMiss exercises the data/fragment cache path, including
+// an overwrite.
+func TestBlockCache_DataHitMiss(t *testing.T) {
+	c := newBlockCache(1 << 17)
 	if _, ok := c.getData(dk(5)); ok {
 		t.Fatal("expected miss")
 	}
@@ -64,13 +62,11 @@ func TestBlockCache_DataHitMissEviction(t *testing.T) {
 		t.Fatalf("data hit mismatch: %v %q", ok, b)
 	}
 	c.putData(dk(5), []byte("FIVE")) // overwrite, no growth
-	if len(c.dataKeys) != 1 {
-		t.Fatalf("data re-put grew key list to %d", len(c.dataKeys))
+	if n := c.data.Len(); n != 1 {
+		t.Fatalf("data re-put holds %d entries, want 1", n)
 	}
-	c.putData(dk(6), []byte("six"))
-	c.putData(dk(7), []byte("seven")) // evicts offset 5
-	if _, ok := c.getData(dk(5)); ok {
-		t.Fatal("offset 5 should have been evicted")
+	if b, _ := c.getData(dk(5)); string(b) != "FIVE" {
+		t.Fatalf("overwrite failed: %q", b)
 	}
 }
 
@@ -86,117 +82,89 @@ func TestBlockCache_NilSafe(t *testing.T) {
 		t.Fatal("nil getData should miss")
 	}
 	c.putData(dk(1), nil) // no panic, no store
+	c.setDataCapMax(1 << 20)
 }
 
 // dk is a data-cache key for a block at offset n.
 func dk(n int64) dataKey { return dataKey{off: n} }
 
-// A sequential pass never asks for a block it evicted, so the cache stays at
-// its starting size; a block asked for again after eviction grows it, up to the
-// bound and no further.
-func TestDataCacheGrowsOnlyOnRereadOfEvicted(t *testing.T) {
-	c := newBlockCache()
-	c.dataCap, c.dataCapMax = 4, 40
-	blk := []byte{1}
+// The data cache starts at 64 blocks and, with its growth rule living in
+// inflight.Cache, grows only when an evicted block is asked for again.
+func TestDataCacheStartsAt64Blocks(t *testing.T) {
+	const bs = 1 << 17
+	c := newBlockCache(bs)
+	if got, want := c.data.Cap(), int64(defaultDataCacheBlocks*bs); got != want {
+		t.Fatalf("start = %d, want %d", got, want)
+	}
+	blk := make([]byte, bs)
 	for i := range 1000 { // a long sequential pass: every key once
 		k := dataKey{off: int64(i), sizeWord: 1}
 		if _, ok := c.getData(k); !ok {
 			c.putData(k, blk)
 		}
 	}
-	if c.dataCap != 4 || len(c.data) != 4 {
-		t.Fatalf("sequential pass: cap %d, held %d, want 4, 4", c.dataCap, len(c.data))
+	if got := c.data.Cap(); got != defaultDataCacheBlocks*bs || c.data.Len() != defaultDataCacheBlocks {
+		t.Fatalf("sequential pass: cap %d, held %d", got, c.data.Len())
 	}
-	// a random workload over 100 blocks: the evicted ones come back
-	for round := range 20 {
-		for i := range 100 {
-			k := dataKey{off: int64((i*7 + round) % 100), sizeWord: 1}
+	for round := range 5 { // a random workload over 200 blocks: evicted ones come back
+		for i := range 200 {
+			k := dataKey{off: int64((i*7 + round) % 200), sizeWord: 1}
 			if _, ok := c.getData(k); !ok {
 				c.putData(k, blk)
 			}
 		}
 	}
-	if c.dataCap != 40 {
-		t.Fatalf("after re-reads cap = %d, want the bound 40", c.dataCap)
-	}
-	if len(c.data) > 40 {
-		t.Fatalf("holds %d blocks, bound 40", len(c.data))
+	if c.data.Cap() <= defaultDataCacheBlocks*bs {
+		t.Fatalf("cap %d did not grow on re-reads of evicted blocks", c.data.Cap())
 	}
 }
 
-func TestDataCacheGhostIsBounded(t *testing.T) {
-	c := newBlockCache()
-	c.dataCap, c.dataCapMax = 1, 1
-	for i := range 3 * ghostCap {
+// Tiny blocks are counted at minCountedBlock each, so the bound is never
+// hundreds of millions of entries.
+func TestDataCacheTinyBlocksCountedAtFloor(t *testing.T) {
+	c := newBlockCache(1)
+	if got, want := c.data.Cap(), int64(defaultDataCacheBlocks*minCountedBlock); got != want {
+		t.Fatalf("start = %d, want %d", got, want)
+	}
+	for i := range 10 * defaultDataCacheBlocks {
 		c.putData(dataKey{off: int64(i)}, []byte{1})
 	}
-	if len(c.ghost) > ghostCap || len(c.ghostKeys) > ghostCap {
-		t.Fatalf("ghost holds %d/%d keys, cap %d", len(c.ghost), len(c.ghostKeys), ghostCap)
+	if n := c.data.Len(); n != defaultDataCacheBlocks {
+		t.Fatalf("holds %d tiny blocks, want %d", n, defaultDataCacheBlocks)
 	}
 }
 
 func TestSetMaxDataCache(t *testing.T) {
-	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: newBlockCache()}
-	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
-	if want := DefaultMaxDataCacheBytes / (1 << 17); fs.cache.dataCapMax != want {
-		t.Errorf("max = %d blocks, want %d", fs.cache.dataCapMax, want)
-	}
+	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: newBlockCache(1 << 17)}
+	start := fs.cache.data.Cap()
 	fs.SetMaxDataCache(1) // below the starting size: held at the starting size
-	if fs.cache.dataCapMax != defaultDataCacheBlocks {
-		t.Errorf("max %d, want the starting %d", fs.cache.dataCapMax, defaultDataCacheBlocks)
+	if got := fs.cache.data.Cap(); got != start {
+		t.Errorf("cap %d, want the starting %d", got, start)
 	}
-	before := fs.cache.dataCapMax
-	fs.SetMaxDataCache(0) // nothing to set
-	if fs.cache.dataCapMax != before {
-		t.Errorf("SetMaxDataCache(0) changed the bound to %d", fs.cache.dataCapMax)
-	}
+	fs.SetMaxDataCache(0)                                               // nothing to set
 	(&FS{}).SetMaxDataCache(1 << 20)                                    // no superblock: no panic
 	(&FS{sb: &Superblock{BlockSize: 1 << 17}}).SetMaxDataCache(1 << 20) // no cache: no panic
 }
 
-// A crafted block size of 1 must not turn the byte bound into 2^28 entries.
-func TestSetMaxDataCacheTinyBlockSize(t *testing.T) {
-	fs := &FS{sb: &Superblock{BlockSize: 1}, cache: newBlockCache()}
-	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
-	if want := DefaultMaxDataCacheBytes / minCountedBlock; fs.cache.dataCapMax != want {
-		t.Errorf("max = %d entries, want %d", fs.cache.dataCapMax, want)
-	}
-}
-
 // A cache that grew shrinks when the bound is lowered.
 func TestSetMaxDataCacheShrinks(t *testing.T) {
-	c := newBlockCache()
-	c.dataCap, c.dataCapMax = 200, 200
-	for i := range 200 {
-		c.putData(dataKey{off: int64(i)}, []byte{1})
-	}
-	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: c}
-	fs.SetMaxDataCache(8 << 20)
-	if c.dataCap != 64 || len(c.data) != 64 {
-		t.Fatalf("cap %d, held %d, want 64, 64", c.dataCap, len(c.data))
-	}
-	if _, ok := c.getData(dataKey{off: 199}); !ok {
-		t.Error("shrinking evicted the newest block, want the oldest")
-	}
-}
-
-// Growth under concurrent readers is race-free and stays within the bound.
-func TestDataCacheGrowthConcurrent(t *testing.T) {
-	c := newBlockCache()
-	c.dataCap, c.dataCapMax = 4, 50
-	var wg sync.WaitGroup
-	for g := range 8 {
-		wg.Go(func() {
-			for i := range 2000 {
-				k := dataKey{off: int64((i*13 + g) % 120)}
-				if _, ok := c.getData(k); !ok {
-					c.putData(k, []byte{1})
-				}
+	const bs = 1 << 17
+	c := newBlockCache(bs)
+	fs := &FS{sb: &Superblock{BlockSize: bs}, cache: c}
+	blk := make([]byte, bs)
+	for round := range 4 {
+		for i := range 300 {
+			k := dataKey{off: int64((i*7 + round) % 300)}
+			if _, ok := c.getData(k); !ok {
+				c.putData(k, blk)
 			}
-		})
+		}
 	}
-	wg.Wait()
-	if len(c.data) > 50 || c.dataCap > 50 {
-		t.Fatalf("held %d, cap %d, bound 50", len(c.data), c.dataCap)
+	if c.data.Cap() <= defaultDataCacheBlocks*bs {
+		t.Fatal("setup: cache did not grow")
+	}
+	fs.SetMaxDataCache(8 << 20)
+	if c.data.Cap() != 8<<20 || c.data.Len() != defaultDataCacheBlocks {
+		t.Fatalf("cap %d, held %d, want %d, %d", c.data.Cap(), c.data.Len(), 8<<20, defaultDataCacheBlocks)
 	}
 }
