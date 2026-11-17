@@ -82,8 +82,8 @@ func (fs *FS) readBlock(off int64, sizeWord uint32) ([]byte, error) {
 // stores it raw when compression does not shrink it (random or already-packed
 // data): without this each such file re-read the whole block from the device
 // (a metadata walk of 4000 small files was 1.4x slower than the kernel, #49).
-// The cache is the same bounded one (defaultDataCacheBlocks blocks of at most
-// block_size bytes), and data blocks of large files are not cached, so a
+// The cache is the same bounded one (it starts at defaultDataCacheBlocks blocks
+// of at most block_size bytes and grows only to SetMaxDataCache's bound), and data blocks of large files are not cached, so a
 // sequential read does not churn it.
 func (fs *FS) readBlockOpt(off int64, sizeWord uint32, cacheRaw bool) ([]byte, error) {
 	n, compressed := blockOnDiskSize(sizeWord)

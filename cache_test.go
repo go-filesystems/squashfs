@@ -5,6 +5,7 @@ package squashfs
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 )
 
@@ -89,3 +90,113 @@ func TestBlockCache_NilSafe(t *testing.T) {
 
 // dk is a data-cache key for a block at offset n.
 func dk(n int64) dataKey { return dataKey{off: n} }
+
+// A sequential pass never asks for a block it evicted, so the cache stays at
+// its starting size; a block asked for again after eviction grows it, up to the
+// bound and no further.
+func TestDataCacheGrowsOnlyOnRereadOfEvicted(t *testing.T) {
+	c := newBlockCache()
+	c.dataCap, c.dataCapMax = 4, 40
+	blk := []byte{1}
+	for i := range 1000 { // a long sequential pass: every key once
+		k := dataKey{off: int64(i), sizeWord: 1}
+		if _, ok := c.getData(k); !ok {
+			c.putData(k, blk)
+		}
+	}
+	if c.dataCap != 4 || len(c.data) != 4 {
+		t.Fatalf("sequential pass: cap %d, held %d, want 4, 4", c.dataCap, len(c.data))
+	}
+	// a random workload over 100 blocks: the evicted ones come back
+	for round := range 20 {
+		for i := range 100 {
+			k := dataKey{off: int64((i*7 + round) % 100), sizeWord: 1}
+			if _, ok := c.getData(k); !ok {
+				c.putData(k, blk)
+			}
+		}
+	}
+	if c.dataCap != 40 {
+		t.Fatalf("after re-reads cap = %d, want the bound 40", c.dataCap)
+	}
+	if len(c.data) > 40 {
+		t.Fatalf("holds %d blocks, bound 40", len(c.data))
+	}
+}
+
+func TestDataCacheGhostIsBounded(t *testing.T) {
+	c := newBlockCache()
+	c.dataCap, c.dataCapMax = 1, 1
+	for i := range 3 * ghostCap {
+		c.putData(dataKey{off: int64(i)}, []byte{1})
+	}
+	if len(c.ghost) > ghostCap || len(c.ghostKeys) > ghostCap {
+		t.Fatalf("ghost holds %d/%d keys, cap %d", len(c.ghost), len(c.ghostKeys), ghostCap)
+	}
+}
+
+func TestSetMaxDataCache(t *testing.T) {
+	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: newBlockCache()}
+	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
+	if want := DefaultMaxDataCacheBytes / (1 << 17); fs.cache.dataCapMax != want {
+		t.Errorf("max = %d blocks, want %d", fs.cache.dataCapMax, want)
+	}
+	fs.SetMaxDataCache(1) // below the starting size: held at the starting size
+	if fs.cache.dataCapMax != defaultDataCacheBlocks {
+		t.Errorf("max %d, want the starting %d", fs.cache.dataCapMax, defaultDataCacheBlocks)
+	}
+	before := fs.cache.dataCapMax
+	fs.SetMaxDataCache(0) // nothing to set
+	if fs.cache.dataCapMax != before {
+		t.Errorf("SetMaxDataCache(0) changed the bound to %d", fs.cache.dataCapMax)
+	}
+	(&FS{}).SetMaxDataCache(1 << 20)                                    // no superblock: no panic
+	(&FS{sb: &Superblock{BlockSize: 1 << 17}}).SetMaxDataCache(1 << 20) // no cache: no panic
+}
+
+// A crafted block size of 1 must not turn the byte bound into 2^28 entries.
+func TestSetMaxDataCacheTinyBlockSize(t *testing.T) {
+	fs := &FS{sb: &Superblock{BlockSize: 1}, cache: newBlockCache()}
+	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
+	if want := DefaultMaxDataCacheBytes / minCountedBlock; fs.cache.dataCapMax != want {
+		t.Errorf("max = %d entries, want %d", fs.cache.dataCapMax, want)
+	}
+}
+
+// A cache that grew shrinks when the bound is lowered.
+func TestSetMaxDataCacheShrinks(t *testing.T) {
+	c := newBlockCache()
+	c.dataCap, c.dataCapMax = 200, 200
+	for i := range 200 {
+		c.putData(dataKey{off: int64(i)}, []byte{1})
+	}
+	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: c}
+	fs.SetMaxDataCache(8 << 20)
+	if c.dataCap != 64 || len(c.data) != 64 {
+		t.Fatalf("cap %d, held %d, want 64, 64", c.dataCap, len(c.data))
+	}
+	if _, ok := c.getData(dataKey{off: 199}); !ok {
+		t.Error("shrinking evicted the newest block, want the oldest")
+	}
+}
+
+// Growth under concurrent readers is race-free and stays within the bound.
+func TestDataCacheGrowthConcurrent(t *testing.T) {
+	c := newBlockCache()
+	c.dataCap, c.dataCapMax = 4, 50
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Go(func() {
+			for i := range 2000 {
+				k := dataKey{off: int64((i*13 + g) % 120)}
+				if _, ok := c.getData(k); !ok {
+					c.putData(k, []byte{1})
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if len(c.data) > 50 || c.dataCap > 50 {
+		t.Fatalf("held %d, cap %d, bound 50", len(c.data), c.dataCap)
+	}
+}
