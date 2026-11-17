@@ -156,15 +156,18 @@ VM, host load below 8:
 
 | compressor | cold: kernel | cold: v0.8.1 | cold: now | warm: kernel | warm: now |
 |---|---:|---:|---:|---:|---:|
+| xz | 3798 | 325 | 2951 | 1573429 | 3034088 |
 | gzip | 21875 | 2030 | 16326 | 1513661 | 2853186 |
 | zstd | 51286 | 6737 | 45869 | 1596586 | 2184032 |
+| lzo | 60764 | 5242 | 52636 | 1676534 | 2978674 |
 | lz4 | 84994 | 21881 | 109138 | 1566188 | 2675033 |
 
 Memory: the cache can hold up to 256 MiB of decoded blocks once a workload has
 shown it needs them (one 256 MiB file read at random); lower the bound with
-`SetMaxDataCache` where that is too much. gzip stays 20 % behind the kernel on a
-cold pass: a deflate stream cannot stop early, and lz4 and lzo, which could,
-already do not need to.
+`SetMaxDataCache` where that is too much. Cold, xz is at 78 % of the kernel,
+gzip 75 %, lzo 87 %, zstd 89 % and lz4 128 %; a deflate or xz stream cannot stop
+early, and the lzo and lz4 decoders that could do not need to (v0.8.1 xz figure
+from the readpath-par run, the other columns from the same driver as the rest).
 
 ## Judged by
 
