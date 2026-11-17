@@ -53,11 +53,33 @@ func Open(rs io.ReaderAt, size int64) (*FS, error) {
 		return nil, err
 	}
 	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache(), workers: defaultReadParallelism()}
+	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
 	if c, ok := rs.(io.Closer); ok {
 		fs.closer = c
 	}
 	return fs, nil
 }
+
+// SetMaxDataCache bounds, in bytes of decoded data, how far the data-block
+// cache may grow. The cache starts at 64 blocks (8 MiB at the default block
+// size) and grows only when a block it evicted is requested again: a random
+// read of a file larger than the cache does at once, one sequential pass never
+// does, a second pass over a file larger than the cache does. A bound at or
+// below the starting size keeps it fixed, and a cache already above the bound
+// shrinks to it. Blocks are counted at no less than 4 KiB each (mksquashfs
+// writes none smaller), so a crafted tiny block size cannot turn the bound
+// into hundreds of millions of entries. The default is
+// [DefaultMaxDataCacheBytes]. Safe to call at any time.
+func (fs *FS) SetMaxDataCache(bytes int64) {
+	if fs.sb == nil || bytes <= 0 {
+		return
+	}
+	bs := max(int64(fs.sb.BlockSize), minCountedBlock)
+	fs.cache.setDataCapMax(int(min(bytes/bs, 1<<30)))
+}
+
+// minCountedBlock is the smallest size a cached data block is counted at.
+const minCountedBlock = 4096
 
 // OpenFile opens path read-only and wires it into Open. The returned FS owns
 // the file handle and closes it on Close.

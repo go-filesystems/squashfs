@@ -141,8 +141,30 @@ read), host load below 7:
 
 At one CPU xz, gzip, zstd and lzo remain behind the kernel (open defects, single
 core kernels); at four, ours is 2.7 to 3.1 times the kernel on every
-compressor. Random 4 KiB reads are not changed by the read-ahead (xz 324 reads/s
-parallel against 313 serial; the kernel does 3700, a separate gap).
+compressor. Random 4 KiB reads are not changed by the read-ahead.
+
+### Random 4 KiB reads
+
+The decoded-data cache starts at 64 blocks (8 MiB at 128 KiB) and grows, up to
+`DefaultMaxDataCacheBytes` (256 MiB, `(*FS).SetMaxDataCache(bytes)`), only when a
+block it evicted is requested again: a random read of a file larger than the
+cache does, one sequential pass does not. Before, 20000 random 4 KiB reads over
+a 256 MiB file decoded about 19400 blocks where the kernel's page cache decoded
+2048. Reads per second over that file, median of 3 interleaved rounds, caches
+dropped before the cold pass, the warm pass being the same offsets again, 4 vCPU
+VM, host load below 8:
+
+| compressor | cold: kernel | cold: v0.8.1 | cold: now | warm: kernel | warm: now |
+|---|---:|---:|---:|---:|---:|
+| gzip | 21875 | 2030 | 16326 | 1513661 | 2853186 |
+| zstd | 51286 | 6737 | 45869 | 1596586 | 2184032 |
+| lz4 | 84994 | 21881 | 109138 | 1566188 | 2675033 |
+
+Memory: the cache can hold up to 256 MiB of decoded blocks once a workload has
+shown it needs them (one 256 MiB file read at random); lower the bound with
+`SetMaxDataCache` where that is too much. gzip stays 20 % behind the kernel on a
+cold pass: a deflate stream cannot stop early, and lz4 and lzo, which could,
+already do not need to.
 
 ## Judged by
 

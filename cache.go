@@ -35,8 +35,15 @@ type blockCache struct {
 	dataCap  int
 	metaKeys []int64 // insertion order, for FIFO eviction once metaCap is hit
 	dataKeys []dataKey
-	frag     map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
-	fragKeys []uint32
+	// dataCap starts at defaultDataCacheBlocks and grows (to dataCapMax) only
+	// when a block that was evicted is requested again: a random read of a file
+	// larger than the cache does at once; one sequential pass never does, a
+	// second pass over a file larger than the cache does.
+	dataCapMax int
+	ghost      map[dataKey]struct{} // keys of evicted data blocks, at most ghostCap
+	ghostKeys  []dataKey
+	frag       map[uint32]fragmentEntry // fragment-table entries (bounded by maxFragCache)
+	fragKeys   []uint32
 }
 
 // Default cache caps. Metadata blocks are tiny (<= 8 KiB) and few, so we keep a
@@ -45,6 +52,13 @@ type blockCache struct {
 const (
 	defaultMetaCacheBlocks = 16384 // up to ~128 MiB of metadata, normally far less
 	defaultDataCacheBlocks = 64    // up to ~8 MiB at the 128 KiB default block size
+	ghostCap               = 16384 // evicted data-block keys remembered (16 bytes each)
+
+	// DefaultMaxDataCacheBytes is how far the data cache may grow, when the
+	// workload re-reads blocks it evicted, before it stops: 256 MiB of decoded
+	// blocks, the whole of the judge's random-read file. It starts at 8 MiB and
+	// a single sequential pass never grows it. See [FS.SetMaxDataCache].
+	DefaultMaxDataCacheBytes = 256 << 20
 )
 
 func newBlockCache() *blockCache {
@@ -53,6 +67,8 @@ func newBlockCache() *blockCache {
 		data:    make(map[dataKey][]byte),
 		metaCap: defaultMetaCacheBlocks,
 		dataCap: defaultDataCacheBlocks,
+
+		dataCapMax: defaultDataCacheBlocks,
 	}
 }
 
@@ -107,14 +123,55 @@ func (c *blockCache) putData(k dataKey, b []byte) {
 	}
 	c.mu.Lock()
 	if _, exists := c.data[k]; !exists {
+		if _, evicted := c.ghost[k]; evicted {
+			// A block we evicted is wanted again: the cache was too small for
+			// this workload, not merely cold. Grow it, up to its bound.
+			delete(c.ghost, k)
+			if c.dataCap < c.dataCapMax {
+				c.dataCap = min(c.dataCapMax, c.dataCap+max(1, c.dataCap/16))
+			}
+		}
 		if len(c.data) >= c.dataCap && len(c.dataKeys) > 0 {
 			old := c.dataKeys[0]
 			c.dataKeys = c.dataKeys[1:]
 			delete(c.data, old)
+			c.remember(old)
 		}
 		c.dataKeys = append(c.dataKeys, k)
 	}
 	c.data[k] = b
+	c.mu.Unlock()
+}
+
+// remember records the key of an evicted data block in the ghost set, a bounded
+// FIFO of keys only (no data). Called with c.mu held.
+func (c *blockCache) remember(k dataKey) {
+	if c.ghost == nil {
+		c.ghost = make(map[dataKey]struct{})
+	}
+	if len(c.ghostKeys) >= ghostCap {
+		delete(c.ghost, c.ghostKeys[0])
+		c.ghostKeys = c.ghostKeys[1:]
+	}
+	c.ghost[k] = struct{}{}
+	c.ghostKeys = append(c.ghostKeys, k)
+}
+
+// setDataCapMax sets the most data blocks the cache may grow to, never below
+// the starting size. A cache already above it shrinks to it at once.
+func (c *blockCache) setDataCapMax(n int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.dataCapMax = max(n, defaultDataCacheBlocks)
+	if c.dataCap > c.dataCapMax {
+		c.dataCap = c.dataCapMax
+		for len(c.data) > c.dataCap && len(c.dataKeys) > 0 {
+			delete(c.data, c.dataKeys[0])
+			c.dataKeys = c.dataKeys[1:]
+		}
+	}
 	c.mu.Unlock()
 }
 
