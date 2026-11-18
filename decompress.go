@@ -204,16 +204,24 @@ var zstdDecoder = func() *zstd.Decoder {
 	return d
 }()
 
+// zstdOverAlloc is the slack klauspost/compress wants past the output's end
+// (compressedBlockOverAlloc).
+const zstdOverAlloc = 32
+
 // zstdDecompressor decodes SquashFS "zstd" blocks (standard zstd frames).
 type zstdDecompressor struct{}
 
 func (zstdDecompressor) decompress(src []byte, maxOut int) ([]byte, error) {
-	out, err := zstdDecoder.DecodeAll(src, make([]byte, 0, maxOut))
+	// The decoder's fast sequence loop needs 32 bytes of slack past the block
+	// in the destination; with an exact-size one every block took the
+	// bounds-exact loop (83 % of a 128 KiB block's time, zfs#68). The slack is
+	// never returned: the result is cut back to its length.
+	out, err := zstdDecoder.DecodeAll(src, make([]byte, 0, maxOut+zstdOverAlloc))
 	if err != nil {
 		return nil, fmt.Errorf("squashfs: zstd: %w", err)
 	}
 	if len(out) > maxOut {
 		return nil, fmt.Errorf("%w: decompressed block exceeds %d bytes", ErrCorrupt, maxOut)
 	}
-	return out, nil
+	return out[:len(out):len(out)], nil
 }
