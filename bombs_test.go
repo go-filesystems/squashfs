@@ -63,7 +63,7 @@ func metaFS(payload []byte) *FS {
 		size:  int64(len(img)),
 		d:     gzipDecompressor{},
 		sb:    &Superblock{BlockSize: 131072},
-		cache: newBlockCache(),
+		cache: newBlockCache(1 << 17),
 	}
 }
 
@@ -107,7 +107,7 @@ func TestBombSuperblockBlockSize(t *testing.T) {
 func TestBombReadBlockLengthChecked(t *testing.T) {
 	img := make([]byte, 1<<18)
 	fs := &FS{rs: bytes.NewReader(img), size: int64(len(img)), d: gzipDecompressor{},
-		sb: &Superblock{BlockSize: 1 << 20}, cache: newBlockCache()}
+		sb: &Superblock{BlockSize: 1 << 20}, cache: newBlockCache(1 << 17)}
 
 	refused(t, "compressed word 0xFFFFFF", 64<<10, func() {
 		if _, err := fs.readBlock(0, 0xFFFFFF); !errors.Is(err, ErrCorrupt) {
@@ -316,7 +316,7 @@ func TestBombXattrIndexLazy(t *testing.T) {
 	hdr := make([]byte, 16)
 	binary.LittleEndian.PutUint32(hdr[8:], 0xFFFFFE00)
 	fs := &FS{rs: bytes.NewReader(hdr), size: int64(len(hdr)), d: gzipDecompressor{},
-		sb: &Superblock{BlockSize: 131072}, cache: newBlockCache()}
+		sb: &Superblock{BlockSize: 131072}, cache: newBlockCache(1 << 17)}
 	refused(t, "index larger than the image", 64<<10, func() {
 		if _, err := fs.readXattrTable(); !errors.Is(err, ErrCorrupt) {
 			t.Errorf("err = %v, want ErrCorrupt", err)

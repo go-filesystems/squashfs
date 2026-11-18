@@ -52,7 +52,7 @@ func Open(rs io.ReaderAt, size int64) (*FS, error) {
 	if err := readCompressorOptions(rs, sb); err != nil {
 		return nil, err
 	}
-	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache(), workers: defaultReadParallelism()}
+	fs := &FS{rs: rs, size: size, sb: sb, d: d, cache: newBlockCache(int64(sb.BlockSize)), workers: defaultReadParallelism()}
 	fs.SetMaxDataCache(DefaultMaxDataCacheBytes)
 	if c, ok := rs.(io.Closer); ok {
 		fs.closer = c
@@ -74,8 +74,7 @@ func (fs *FS) SetMaxDataCache(bytes int64) {
 	if fs.sb == nil || bytes <= 0 {
 		return
 	}
-	bs := max(int64(fs.sb.BlockSize), minCountedBlock)
-	fs.cache.setDataCapMax(int(min(bytes/bs, 1<<30)))
+	fs.cache.setDataCapMax(bytes)
 }
 
 // minCountedBlock is the smallest size a cached data block is counted at.
