@@ -66,9 +66,12 @@ func newBlockCache(blockSize int64) *blockCache {
 		meta:    make(map[int64]metaEntry),
 		metaCap: defaultMetaCacheBlocks,
 		data: inflight.NewCache[dataKey, []byte](start, DefaultMaxDataCacheBytes, func(b []byte) int64 {
-			// Counted at no less than 4 KiB (mksquashfs writes no block smaller),
-			// so crafted tiny blocks cannot become hundreds of millions of entries.
-			return max(int64(len(b)), minCountedBlock)
+			// Charged what the slice keeps alive, cap not len (the decoders return
+			// dst[:n] of a block_size buffer, so a crafted block that decodes to a
+			// few bytes still holds block_size), and at no less than 4 KiB
+			// (mksquashfs writes no block smaller), so crafted tiny blocks cannot
+			// become hundreds of millions of entries.
+			return max(int64(cap(b)), minCountedBlock)
 		}),
 	}
 }

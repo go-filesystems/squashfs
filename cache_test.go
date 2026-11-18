@@ -134,6 +134,19 @@ func TestDataCacheTinyBlocksCountedAtFloor(t *testing.T) {
 	}
 }
 
+// A block that decodes to a few bytes into a block_size buffer holds the whole
+// buffer: it is charged for it, so crafted tiny blocks cannot hold gigabytes.
+func TestDataCacheChargesCapacityNotLength(t *testing.T) {
+	const bs = 1 << 20
+	c := newBlockCache(bs)
+	for i := range 1000 {
+		c.putData(dataKey{off: int64(i)}, make([]byte, 1, bs))
+	}
+	if n := c.data.Len(); n != defaultDataCacheBlocks {
+		t.Fatalf("holds %d entries of capacity %d, want %d (the bound is 64 blocks)", n, bs, defaultDataCacheBlocks)
+	}
+}
+
 func TestSetMaxDataCache(t *testing.T) {
 	fs := &FS{sb: &Superblock{BlockSize: 1 << 17}, cache: newBlockCache(1 << 17)}
 	start := fs.cache.data.Cap()
