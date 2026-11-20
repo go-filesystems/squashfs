@@ -5,7 +5,7 @@ module github.com/go-filesystems/squashfs/benchmarks
 
 go 1.27.4
 
-require github.com/go-filesystems/squashfs v0.4.0
+require github.com/go-filesystems/squashfs v0.9.2
 
 require (
 	github.com/go-compressions/lz4 v0.5.1 // indirect
