@@ -203,4 +203,8 @@ the kerneljudge README.
   in-place edits).
 - Extended attributes are read (`(*FS).Xattrs`); the builder does not write them.
 - `Stat` does not follow a final symlink (lstat); `ReadLink` gives the target.
+- One path lookup follows at most 40 symlinks IN TOTAL (a `go-volumes/safeio`
+  `SymlinkBudget`, like Linux's `MAXSYMLINKS`), not only 40 deep: a chain
+  `l0 -> l1/l1 -> ...` would otherwise cost 2^n lookups. It is refused with
+  `ErrTooManyLinks`, which also matches `safeio.ErrSymlinkLoop`.
 - Intended for tooling and testing.

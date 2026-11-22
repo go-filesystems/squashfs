@@ -6,10 +6,9 @@ package squashfs
 import (
 	"fmt"
 	"strings"
-)
 
-// maxSymlinkHops bounds symlink resolution per path lookup.
-const maxSymlinkHops = 40
+	"github.com/go-volumes/safeio"
+)
 
 // resolve walks an absolute path from the root inode. When followFinal is
 // true a symlink at the final component is followed; otherwise the symlink
@@ -20,13 +19,13 @@ func resolve(fs *FS, path string, followFinal bool) (*inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return resolveFrom(fs, root, path, followFinal, 0)
+	return resolveFrom(fs, root, path, followFinal, safeio.NewSymlinkBudget(0))
 }
 
-func resolveFrom(fs *FS, start *inode, path string, followFinal bool, hops int) (*inode, error) {
-	if hops > maxSymlinkHops {
-		return nil, ErrTooManyLinks
-	}
+// resolveFrom resolves path from start. budget is shared by every recursive
+// step of ONE lookup and bounds the TOTAL number of symlinks followed: a depth
+// limit alone let 40 links that each resolve two more cost 2^39 lookups.
+func resolveFrom(fs *FS, start *inode, path string, followFinal bool, budget *safeio.SymlinkBudget) (*inode, error) {
 	parts := splitPath(path)
 	cur := start
 	for i, name := range parts {
@@ -52,6 +51,9 @@ func resolveFrom(fs *FS, start *inode, path string, followFinal bool, hops int) 
 		}
 		last := i == len(parts)-1
 		if child.isSymlink() && (!last || followFinal) {
+			if err := budget.Follow(); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrTooManyLinks, err)
+			}
 			target := child.symlinkTarget
 			base := cur // relative links resolve against the containing dir
 			if strings.HasPrefix(target, "/") {
@@ -60,7 +62,7 @@ func resolveFrom(fs *FS, start *inode, path string, followFinal bool, hops int) 
 					return nil, err
 				}
 			}
-			child, err = resolveFrom(fs, base, target, true, hops+1)
+			child, err = resolveFrom(fs, base, target, true, budget)
 			if err != nil {
 				return nil, err
 			}
